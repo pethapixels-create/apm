@@ -39,7 +39,6 @@ from apm_cli.deps.lockfile_generator import (
     refusal_exit,
 )
 from apm_cli.deps.lockfile_write_authority import LockfileWriter, lockfile_writer
-from apm_cli.deps.registry.feature_gate import UserRegistryConfigDisabledError
 from apm_cli.install.argv import (
     _get_invocation_argv,
     _split_argv_at_double_dash,
@@ -1753,10 +1752,13 @@ def _install_apm_packages(ctx, outcome):
             apm_package = outcome.prospective_package
     except click.UsageError:
         raise
-    except UserRegistryConfigDisabledError as e:
-        logger.error(str(e))
-        raise InstallFailureAlreadyRendered("Registry configuration needs registries") from e
     except Exception as e:
+        # Imported on failure only: the registry package is heavy to load.
+        from apm_cli.deps.registry.feature_gate import UserRegistryConfigDisabledError
+
+        if isinstance(e, UserRegistryConfigDisabledError):
+            logger.error(str(e))
+            raise InstallFailureAlreadyRendered("Registry configuration needs registries") from e
         logger.error(f"Failed to parse {ctx.manifest_display}: {e}")
         raise InstallFailureAlreadyRendered("Failed to parse install manifest") from e
 

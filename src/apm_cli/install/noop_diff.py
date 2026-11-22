@@ -97,6 +97,37 @@ def _copies_valid(project_root: Path, lock: Any) -> bool:
     return True
 
 
+def _sources_scan_clean(project_root: Path, lock: Any) -> bool:
+    """No package file the pre-deploy security scan reads carries any finding.
+
+    The full pipeline re-scans each package's deployable sources on every
+    install and reports warnings even when nothing is redeployed. Scanning
+    every file of each copy (a superset) with the same scanner keeps that
+    verdict and output: any finding, of any severity, takes the full pipeline.
+    """
+    from apm_cli.constants import APM_MODULES_DIR
+    from apm_cli.security.content_scanner import ContentScanner
+
+    modules = project_root / APM_MODULES_DIR
+    for key, dep in lock.dependencies.items():
+        if key == ".":
+            continue
+        root = dep.to_dependency_ref().get_install_path(modules)
+        for directory, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d != ".git"]
+            for name in filenames:
+                if ContentScanner.scan_file(Path(directory) / name):
+                    return False
+    return True
+
+
+def _install_audit_off() -> bool:
+    """The opt-in install-time audit phase would not run (it rescans every install)."""
+    from apm_cli.core.experimental import is_enabled
+
+    return not is_enabled("external_scanners")
+
+
 def _deployed_state_current(project_root: Path, lock: Any, manifest: Any, fetch: Any) -> str | None:
     """The audit owner's narrow checks, on one parsed lock and manifest; None when all pass.
 
@@ -188,6 +219,10 @@ def full_run_reason(project_root: Path) -> str | None:
         return "org policy"
     if not _copies_valid(project_root, lock):
         return "package copies"
+    if not _install_audit_off():
+        return "install-time audit enabled"
+    if not _sources_scan_clean(project_root, lock):
+        return "security scan findings"
     failed = _deployed_state_current(project_root, lock, manifest, fetch)
     if failed:
         return failed
