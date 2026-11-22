@@ -315,6 +315,7 @@ SCENARIO_MODULES = (
     "test_pack_lock_states",
     "test_platform",
     "test_policy_pairs",
+    "test_source_pairs",
     "test_user_scope",
 )
 

@@ -15164,8 +15164,9 @@
    "family": "pair",
    "issue": "#4096",
    "lane": "T-2",
-   "status": "baseline",
-   "strength": "e2e"
+   "status": "required",
+   "strength": "e2e",
+   "witness": "tests/lifecycle/scenarios/test_network_offline.py::test_registry_mcp_and_bundle_sources_work_offline"
   },
   "pair|OP=bundle-install|DEPLOYED=edited": {
    "family": "pair",
@@ -15844,8 +15845,9 @@
    "family": "pair",
    "issue": "#4096",
    "lane": "T-2",
-   "status": "baseline",
-   "strength": "e2e"
+   "status": "required",
+   "strength": "e2e",
+   "witness": "tests/lifecycle/scenarios/test_source_pairs.py::test_compile_and_lock_keep_an_installed_local_bundle[compile]"
   },
   "pair|OP=compile|SRC=local-path": {
    "family": "pair",
@@ -16894,8 +16896,9 @@
    "family": "pair",
    "issue": "#4096",
    "lane": "T-2",
-   "status": "baseline",
-   "strength": "e2e"
+   "status": "required",
+   "strength": "e2e",
+   "witness": "tests/lifecycle/scenarios/test_source_pairs.py::test_compile_and_lock_keep_an_installed_local_bundle[lock]"
   },
   "pair|OP=lock|SRC=local-path": {
    "family": "pair",
@@ -21831,8 +21834,9 @@
    "family": "pair",
    "issue": "#4096",
    "lane": "T-2",
-   "status": "baseline",
-   "strength": "e2e"
+   "status": "required",
+   "strength": "e2e",
+   "witness": "tests/lifecycle/scenarios/test_source_pairs.py::test_a_canvas_from_git_deploys_once_approved"
   },
   "pair|SRC=git|PRIM=hook": {
    "family": "pair",
@@ -21957,8 +21961,9 @@
    "family": "pair",
    "issue": "#4096",
    "lane": "T-2",
-   "status": "baseline",
-   "strength": "e2e"
+   "status": "required",
+   "strength": "e2e",
+   "witness": "tests/lifecycle/scenarios/test_network_offline.py::test_registry_mcp_and_bundle_sources_work_offline"
   },
   "pair|SRC=inline-mcp|DEPLOYED=edited": {
    "family": "pair",
@@ -22207,8 +22212,9 @@
    "family": "pair",
    "issue": "#4096",
    "lane": "T-2",
-   "status": "baseline",
-   "strength": "e2e"
+   "status": "required",
+   "strength": "e2e",
+   "witness": "tests/lifecycle/scenarios/test_network_offline.py::test_registry_mcp_and_bundle_sources_work_offline"
   },
   "pair|SRC=local-bundle|DEPLOYED=edited": {
    "family": "pair",
@@ -23521,8 +23527,9 @@
    "family": "pair",
    "issue": "#4096",
    "lane": "T-2",
-   "status": "baseline",
-   "strength": "e2e"
+   "status": "required",
+   "strength": "e2e",
+   "witness": "tests/lifecycle/scenarios/test_source_pairs.py::test_a_canvas_from_a_git_marketplace_deploys_once_approved"
   },
   "pair|SRC=marketplace-git|PRIM=hook": {
    "credited_by": [
@@ -24321,8 +24328,9 @@
    "family": "pair",
    "issue": "#4096",
    "lane": "T-2",
-   "status": "baseline",
-   "strength": "e2e"
+   "status": "required",
+   "strength": "e2e",
+   "witness": "tests/lifecycle/scenarios/test_network_offline.py::test_converged_project_works_offline[multi-unchanged]"
   },
   "pair|SRC=native-plugin|DEPLOYED=edited": {
    "family": "pair",
@@ -24390,8 +24398,9 @@
    "family": "pair",
    "issue": "#4096",
    "lane": "T-2",
-   "status": "baseline",
-   "strength": "e2e"
+   "status": "required",
+   "strength": "e2e",
+   "witness": "tests/lifecycle/scenarios/test_network_offline.py::test_converged_project_works_offline[multi-unchanged]"
   },
   "pair|SRC=native-plugin|GATE=denied-dependency": {
    "family": "pair",
@@ -24514,15 +24523,17 @@
    "family": "pair",
    "issue": "#4096",
    "lane": "T-2",
-   "status": "baseline",
-   "strength": "e2e"
+   "status": "required",
+   "strength": "e2e",
+   "witness": "tests/lifecycle/scenarios/test_source_pairs.py::test_a_native_plugins_hook_and_lsp_deploy_once_approved"
   },
   "pair|SRC=native-plugin|PRIM=lsp": {
    "family": "pair",
    "issue": "#4096",
    "lane": "T-2",
-   "status": "baseline",
-   "strength": "e2e"
+   "status": "required",
+   "strength": "e2e",
+   "witness": "tests/lifecycle/scenarios/test_source_pairs.py::test_a_native_plugins_hook_and_lsp_deploy_once_approved"
   },
   "pair|SRC=native-plugin|PRIM=mcp": {
    "credited_by": [
@@ -24860,8 +24871,9 @@
    "family": "pair",
    "issue": "#4096",
    "lane": "T-2",
-   "status": "baseline",
-   "strength": "e2e"
+   "status": "required",
+   "strength": "e2e",
+   "witness": "tests/lifecycle/scenarios/test_source_pairs.py::test_a_registry_package_deploys_its_executable_once_approved[p-canvas]"
   },
   "pair|SRC=pkg-registry|PRIM=hook": {
    "credited_by": [
@@ -24885,8 +24897,9 @@
    "family": "pair",
    "issue": "#4096",
    "lane": "T-2",
-   "status": "baseline",
-   "strength": "e2e"
+   "status": "required",
+   "strength": "e2e",
+   "witness": "tests/lifecycle/scenarios/test_source_pairs.py::test_a_registry_package_deploys_its_executable_once_approved[p-lsp]"
   },
   "pair|SRC=pkg-registry|PRIM=mcp": {
    "credited_by": [
