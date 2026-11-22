@@ -220,16 +220,43 @@ def _comparable(world: World, exempt: tuple[str, ...] = ()) -> dict[str, object]
     }
 
 
-def _diff(left: dict, right: dict) -> list[str]:
+def _structural(a: object, b: object, path: str = "") -> list[str]:
+    """Paths where two parsed documents differ, with both values."""
+    if isinstance(a, dict) and isinstance(b, dict):
+        out: list[str] = []
+        for key in sorted(a.keys() | b.keys(), key=str):
+            out += _structural(a.get(key), b.get(key), f"{path}.{key}")
+        return out
+    if isinstance(a, list) and isinstance(b, list) and len(a) == len(b):
+        return [
+            d
+            for i, (x, y) in enumerate(zip(a, b, strict=True))
+            for d in _structural(x, y, f"{path}[{i}]")
+        ]
+    return [] if a == b else [f"{path}: incremental={a!r} fresh={b!r}"]
+
+
+def _shown(world: World, root_id: str, rel: str) -> str:
+    root = world.project if root_id == "project" else world.home
+    path = root / rel
+    if not path.is_file() or path.stat().st_size > 2000:
+        return "<absent>" if not path.exists() else "<large>"
+    return path.read_text(encoding="utf-8", errors="replace").replace(str(world.root), "<ROOT>")
+
+
+def _diff(left: dict, right: dict, worlds: tuple[World, World]) -> list[str]:
     lines = []
     for key in sorted(left.keys() | right.keys()):
         a, b = left.get(key), right.get(key)
-        if isinstance(a, dict) and isinstance(b, dict) and key in ("project", "home"):
+        if key in ("project", "home"):
             for path in sorted(a.keys() | b.keys()):
                 if a.get(path) != b.get(path):
-                    lines.append(f"{key}:{path}: incremental={a.get(path)} fresh={b.get(path)}")
-        elif a != b:
-            lines.append(f"{key}: incremental={a!r}\n   fresh={b!r}")
+                    lines.append(
+                        f"{key}:{path}: incremental={_shown(worlds[0], key, path)!r} "
+                        f"fresh={_shown(worlds[1], key, path)!r}"
+                    )
+        else:
+            lines += [f"{key}{d}" for d in _structural(a, b)]
     return lines
 
 
@@ -276,5 +303,7 @@ def test_install_after_a_change_equals_a_fresh_deploy(
         assert (incremental.project / _SKILL_PATH).read_bytes() == user_bytes, (
             "install overwrote the user's edit of a deployed file" + evidence
         )
-    problems = _diff(_comparable(incremental, exempt), _comparable(fresh, exempt))
+    problems = _diff(
+        _comparable(incremental, exempt), _comparable(fresh, exempt), (incremental, fresh)
+    )
     assert not problems, f"{change}: incremental != fresh deploy\n" + "\n".join(problems) + evidence
