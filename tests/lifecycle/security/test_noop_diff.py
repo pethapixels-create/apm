@@ -213,6 +213,13 @@ def _announces_policy(change: str) -> bool:
     return change.startswith("policy-")
 
 
+def _expects_early_exit(change: str) -> bool:
+    # A user-scope approval is personal config the audit owner's MCP view
+    # never reads (CI and laptops reach one verdict), so the early exit's
+    # consistency gate declines it and the full run decides.
+    return not _announces_policy(change) and change != "revoked-user-approval"
+
+
 def _arrange(world: World, change: str) -> None:
     if _announces_policy(change):
         use_policy(world, "allow")
@@ -242,7 +249,7 @@ def test_install_after_change_matches_the_full_pipeline(
     for name, world in worlds.items():
         world.services.reset()
         _arrange(world, change)
-        _converge(world, fast=name == "fast", expect_hit=not _announces_policy(change))
+        _converge(world, fast=name == "fast", expect_hit=_expects_early_exit(change))
         hooks = sorted(world.project.glob(".github/hooks/p-exec-*.json"))
         assert hooks, f"{name}: the approved p-exec hook must be deployed before the change"
     manifests = {n: (w.project / "apm.yml").read_bytes() for n, w in worlds.items()}

@@ -348,6 +348,7 @@ def _run_services(project_root: Path, manifest: Any, lock: Any, logger: Any) -> 
         exec_allow_map=None,
     )
     allow_map = effective_allow_map(trust)
+    _check_merged_mcp(project_root, manifest, lock, allow_map, logger)
     command = SimpleNamespace(
         project_root=project_root,
         scope=InstallScope.PROJECT,
@@ -362,7 +363,7 @@ def _run_services(project_root: Path, manifest: Any, lock: Any, logger: Any) -> 
         update=False,
         exec_allow_map=allow_map,
         exec_allow_resolved=trust.exec_trust_ctx is not None,
-        mcp_policy_enforced=False,
+        mcp_policy_enforced=True,
     )
     mcp_deps = manifest.get_all_mcp_dependencies()
     return run_service_integrations(
@@ -381,6 +382,54 @@ def _run_services(project_root: Path, manifest: Any, lock: Any, logger: Any) -> 
         target_decision=None,
         active_package_keys=frozenset(k for k in lock.dependencies if k != "."),
         frozen_disposition=FrozenDisposition(replay=False),
+    )
+
+
+def _check_merged_mcp(
+    project_root: Path, manifest: Any, lock: Any, allow_map: Any, logger: Any
+) -> None:
+    """The pre-deploy merged MCP policy check, as check_before_deploy runs it.
+
+    Same owner calls and the same silent collection logger
+    (``commit_gate._prepare_merged_mcp``/``_check_merged_mcp_policy``); the
+    prospective lockfile of a no-op is the existing one.
+    """
+    from apm_cli.constants import APM_MODULES_DIR
+    from apm_cli.deps.lockfile import get_lockfile_path
+    from apm_cli.install.commit_gate import (
+        _AnnouncedPolicyLogger,
+        _SilentLogger,
+        enforce_mcp_policy,
+    )
+    from apm_cli.install.mcp.integration import prepare_mcp_integration
+
+    prepared = prepare_mcp_integration(
+        apm_package=manifest,
+        mcp_deps=list(manifest.get_all_mcp_dependencies()),
+        apm_modules_path=project_root / APM_MODULES_DIR,
+        lock_path=get_lockfile_path(project_root),
+        should_install=True,
+        trust_transitive_mcp=False,
+        logger=_SilentLogger(),
+        active_package_keys=frozenset(k for k in lock.dependencies if k != "."),
+        user_scope=False,
+        project_root=project_root,
+        executable_context=(allow_map, True),
+        no_policy=False,
+        claude_native_keys=frozenset(),
+        prospective_lock=lock,
+    )
+    view = prepared.current_view
+    enforce_mcp_policy(
+        list(prepared.dependencies),
+        brought_in_by=view.brought_in_by if view is not None else None,
+        runtime=None,
+        target_decision=None,
+        user_scope=False,
+        project_root=project_root,
+        no_policy=False,
+        logger=_AnnouncedPolicyLogger(logger),
+        dry_run=False,
     )
 
 
