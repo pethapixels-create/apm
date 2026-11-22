@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -774,7 +775,6 @@ def test_control_file_appearing_during_creation_is_never_clobbered(
 def test_failed_rendering_never_promotes_a_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
 ) -> None:
-    import shutil
 
     from apm_cli.integration.skill_integrator import SkillIntegrator
     from apm_cli.utils import atomic_io, content_hash
@@ -793,7 +793,7 @@ def test_failed_rendering_never_promotes_a_receipt(
         raise OSError(f"injected {stage} failure")
 
     if stage == "copy":
-        monkeypatch.setattr(shutil, "copy2", fail)
+        monkeypatch.setattr(os, "replace", fail)
     elif stage == "rewrite":
         monkeypatch.setattr(integrator, "_resolve_markdown_links_in_skill_bundle", fail)
     elif stage == "hash":
@@ -1141,3 +1141,49 @@ def _receipt_evidence_for(root: Path):
         diagnostics=DiagnosticCollector(),
         kept=(),
     )
+
+
+@pytest.mark.parametrize("lost", ["receipt-store", "installation-marker"])
+def test_trust_lockfile_consent_needs_a_receipt_store_it_could_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lost: str
+) -> None:
+    """An absent store holds no receipt; a store no installation marker binds went unread (#4295)."""
+    from apm_cli.integration.cleanup import DeploymentEvidence, remove_stale_deployed_files
+    from apm_cli.utils.diagnostics import DiagnosticCollector
+
+    monkeypatch.setenv("APM_HOME", str(tmp_path / "apm-home"))
+    root, path, lock = _fixture(tmp_path, monkeypatch)
+    content_hash = compute_file_hash(path)
+    session = _session(root, lock)
+    session.record({path: content_hash}, [TARGET], "pkg")
+    session.flush()
+    (session.state_path if lost == "receipt-store" else session.identity_path).unlink()
+
+    def source_gone(*_args, **_kwargs):
+        raise OSError("source unreachable")
+
+    # The locked render is a collaborator: its source is gone, so it cannot run.
+    monkeypatch.setattr("apm_cli.install.drift.run_replay", source_gone)
+    claim = next(iter(lock.deployment_ledger.records.values())).locator.value
+    diagnostics = DiagnosticCollector()
+    evidence = DeploymentEvidence.collect(
+        root, user_scope=False, lockfile=lock, lockfile_root=root, diagnostics=diagnostics, kept=()
+    )
+    evidence.consent_to_lockfile_hashes()
+    result = remove_stale_deployed_files(
+        [claim],
+        root,
+        dep_key="pkg",
+        targets=None,
+        diagnostics=diagnostics,
+        evidence=evidence,
+        recorded_hashes={claim: content_hash},
+        receipt_retirements=[],
+    )
+
+    if lost == "receipt-store":
+        assert not path.exists() and result.deleted == [claim]
+        assert evidence.consented_deletions() == [claim]
+    else:
+        assert path.read_text(encoding="utf-8") == "rendered old\n" and result.deleted == []
+        assert evidence.kept_under_consent() == frozenset({claim})
