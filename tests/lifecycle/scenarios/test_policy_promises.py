@@ -20,7 +20,7 @@ import pytest
 import yaml
 
 from tests.lifecycle import driver
-from tests.lifecycle.world import use_policy
+from tests.lifecycle.world import use_policy, use_registry
 from tests.lifecycle.world.services import REGISTRY_SERVER
 from tests.utils.local_package import LocalPackageFactory
 
@@ -619,3 +619,47 @@ def test_require_explicit_includes_in_audit(lifecycle_world, includes, fails) ->
         assert "explicit-includes" in text, text
     else:
         assert "Manifest declares explicit includes paths" in text, text
+
+
+# -- G4: registry_source (policy-schema.md, registry_source section) ---------------
+
+
+def _registry_only(world) -> None:
+    use_registry(world)
+    _serve_policy(
+        world,
+        "policy-g4-registry-only",
+        {
+            "name": "g4",
+            "version": "1.0",
+            "enforcement": "block",
+            "registry_source": {"allow_non_registry": False},
+        },
+    )
+
+
+def test_registry_only_policy_admits_a_registry_package(lifecycle_world) -> None:
+    """Control: registry_source allow_non_registry false installs a registry package."""
+    _registry_only(lifecycle_world)
+    result = driver.run(
+        lifecycle_world, ["install", lifecycle_world.packages["p-skill:registry"].spec]
+    )
+    output = " ".join((result.stdout + result.stderr).split())
+    assert result.returncode == 0, output
+    assert (lifecycle_world.project / ".agents/skills/p-skill/SKILL.md").is_file(), output
+
+
+def test_registry_only_policy_refuses_a_non_registry_package(lifecycle_world) -> None:
+    """registry_source.allow_non_registry: false -- a local-path package is refused."""
+    _registry_only(lifecycle_world)
+    factory = LocalPackageFactory(lifecycle_world.root / "g4")
+    package = factory.create("t-local", version="1.0.0")
+    _skill(factory, package, "t-local")
+    manifest = lifecycle_world.project / "apm.yml"
+    before = manifest.read_bytes()
+    result = driver.run(lifecycle_world, ["install", str(package.root)])
+    output = " ".join((result.stdout + result.stderr).split())
+    assert result.returncode == 1, output
+    assert "non-registry source not permitted" in output, output
+    assert manifest.read_bytes() == before
+    assert not (lifecycle_world.project / ".agents/skills/t-local").exists(), output
