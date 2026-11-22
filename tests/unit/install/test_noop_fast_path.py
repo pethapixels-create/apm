@@ -302,3 +302,18 @@ def test_only_a_plain_reinstall_is_eligible(monkeypatch) -> None:
     assert fp.eligible({"mcp_name": "srv"}) is False
     monkeypatch.setattr(sys, "argv", ["apm", "install", "--policy", "./org.yml"])
     assert fp.eligible({}) is False
+
+
+def test_a_converged_cache_pin_marker_is_not_rewritten(tmp_path: Path) -> None:
+    """A no-op must write nothing: an identical .apm-pin stays the same file (I2)."""
+    from apm_cli.install.cache_pin import MARKER_FILENAME, write_marker
+
+    write_marker(tmp_path, "a" * 40)
+    marker = tmp_path / MARKER_FILENAME
+    before = marker.stat()
+    os.utime(marker, ns=(before.st_atime_ns, before.st_mtime_ns - 10_000_000_000))
+    stamped = marker.stat().st_mtime_ns
+    write_marker(tmp_path, "a" * 40)
+    assert marker.stat().st_mtime_ns == stamped, "an identical marker must not be rewritten"
+    write_marker(tmp_path, "b" * 40)
+    assert json.loads(marker.read_text("utf-8"))["resolved_commit"] == "b" * 40

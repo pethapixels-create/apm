@@ -76,8 +76,13 @@ def write_marker(install_path: Path, resolved_commit: str) -> None:
         "resolved_commit": resolved_commit,
     }
     marker = install_path / MARKER_FILENAME
+    text = json.dumps(payload)
     try:
-        marker.write_text(json.dumps(payload), encoding="utf-8")
+        # A converged install leaves an identical regular-file marker untouched.
+        if not marker.is_symlink() and marker.is_file():
+            if marker.read_bytes() == text.encode("utf-8"):
+                return
+        marker.write_text(text, encoding="utf-8")
     except OSError:
         # Read-only mount, permission denied, etc. Drift will surface
         # this on the next audit; install must not fail.
