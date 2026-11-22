@@ -717,23 +717,23 @@ def test_a_users_mcp_entry_blocks_a_server_of_the_same_name(lifecycle_world, src
 
 
 def test_a_users_lsp_entry_is_never_taken_over(lifecycle_world) -> None:
-    """T-6b ``pair|PRIM=lsp|DEPLOYED=unowned`` (#4628): install keeps the user's entry."""
+    """T-6b ``pair|PRIM=lsp|DEPLOYED=unowned`` (#4628, #4697): install keeps the user's entry."""
     scenario, tree = _start(lifecycle_world, ("p-lsp",))
     servers = {"lspServers": {LSP_SERVER: {"command": "mine"}, "user-lsp": {"command": "u"}}}
     scenario.user_write(".github/lsp.json", json.dumps(servers, indent=2) + "\n")
     scenario.run("install p-lsp")
     scenario.run("approve p-lsp")
 
-    # The first failing install still commits the dependency row it resolved, as
-    # the MCP native-conflict path does (#4282); the rerun changes nothing.
-    known = {"I7": Known("#4697", r"failed install changed the lockfile")}
-    for line, cells in (("install", known), ("install --force", None)):
-        credit = {} if cells else {"credit": [_pair("unowned", PRIM="lsp")], "refusal": True}
-        step = scenario.run(line, exit=1, known=cells, **credit)
+    # A conflict that wrote no server commits nothing: I7 holds the lockfile
+    # byte-identical (#4697).
+    locked = scenario.lock_path.read_bytes()
+    for line in ("install", "install --force"):
+        step = scenario.run(line, exit=1, credit=[_pair("unowned", PRIM="lsp")], refusal=True)
         assert f"LSP server '{LSP_SERVER}' conflicts with the existing" in step.output, line
         assert "Preserved that entry" in step.output, line
         tree.assert_intact(line)
-    assert_changes(step.changed, (), label="rerun")
+        assert scenario.lock_path.read_bytes() == locked, line
+        assert_changes(step.changed, (), label=line)
     lock = scenario.lock_path.read_text(encoding="utf-8")
     assert LSP_SERVER not in lock, "the lock claims the user's entry"
     scenario.finish()
@@ -993,7 +993,6 @@ def test_a_users_file_at_the_plugin_bin_path_refuses_the_plugin(lifecycle_world)
         credit=[_pair("unowned", PRIM="bin")],
         keep={"home": (_PLUGIN_BIN,)},
         refusal=True,
-        known={"I7": Known("#4685", r"failed install changed the lockfile")},
     )
     assert "APM never replaces content it did not deploy" in step.output, step.output
     scenario.finish()
@@ -1066,7 +1065,7 @@ _SKIPPED_BUNDLE_HOOK = rf"Skipping {re.escape(_BUNDLE_HOOK)} -- local file exist
 
 @pytest.mark.parametrize("deployed", _DEPLOYED_STATES)
 def test_a_local_bundle_never_replaces_the_users_hook(lifecycle_world, deployed) -> None:
-    """#4634: without a lock, the reinstall leaves MCP lock state both gates reject."""
+    """A local bundle never replaces the user's hook, in every deployed state (#4634 fixed)."""
     scenario = _bundle(lifecycle_world)
     if deployed == "unowned":
         scenario.user_write(_BUNDLE_HOOK, '{"hooks": {}, "version": 1}\n')
@@ -1074,7 +1073,7 @@ def test_a_local_bundle_never_replaces_the_users_hook(lifecycle_world, deployed)
     _approve_bundle(scenario, first.output)
     unknown = deployed == "present-provenance-unknown"
     credit = {
-        "credit": [] if unknown else [_pair(deployed, SRC="local-bundle")],
+        "credit": [_pair(deployed, SRC="local-bundle")],
         "keep": {"project": (_BUNDLE_HOOK,)},
         "says": [_SKIPPED_BUNDLE_HOOK],
     }
@@ -1095,13 +1094,7 @@ def test_a_local_bundle_never_replaces_the_users_hook(lifecycle_world, deployed)
         audit = scenario.run("audit --ci", read_only=True, exit=1)
         assert re.search(rf"modified.*{re.escape(_BUNDLE_HOOK)}", " ".join(audit.output.split()))
     else:
-        scenario.pair(
-            audit_known={"R": Known("#4634", r"p-exec-mcp: in lockfile but not in manifest")},
-            frozen_known={
-                "R": Known("#4634", r"MCP server 'p-exec-mcp' is no longer declared"),
-                "I2": Known("#4634", r"converged install-frozen exited 1"),
-            },
-        )
+        scenario.pair()
     scenario.finish()
 
 
@@ -1290,9 +1283,6 @@ CREDITS = credits(
     },
     known={
         "test_edited_executable_files_are_kept": "#4626",
-        "test_a_users_lsp_entry_is_never_taken_over": "#4697",
-        "test_a_users_file_at_the_plugin_bin_path_refuses_the_plugin": "#4685",
-        "test_a_local_bundle_never_replaces_the_users_hook[present-provenance-unknown]": "#4634",
         "test_a_users_mcp_entry_blocks_a_server_of_the_same_name[inline-mcp]": "#4268",
     },
 )

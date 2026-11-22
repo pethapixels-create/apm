@@ -18,7 +18,7 @@ anywhere else under ``src/apm_cli``.
 from __future__ import annotations
 
 import shlex
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from types import MappingProxyType
 
@@ -125,6 +125,26 @@ def kept_file_message(
     return kept_note(path, reason, either_sentence(remedy, *alternatives))
 
 
+def dependency_not_allowed_advice(
+    packages: Sequence[str], denied: int, policy_source: str | None
+) -> tuple[Remediation | None, str]:
+    """Render the next step for *denied* dependencies outside the org allow list (#4570).
+
+    *packages* are the apm.yml entries whose removal drops every denied
+    dependency (a transitive one goes with the entry that brings it in).
+    Returns the bound :data:`DEPENDENCY_NOT_ALLOWED` remediation, or ``None``
+    when no entry is known, and the sentence ``apm audit --ci`` prints.
+    """
+    them = "it" if denied == 1 else "them"
+    source = f" (policy source: {policy_source})" if policy_source else ""
+    ask = f"ask your org admin to allow {them}{source}"
+    if not packages:
+        return None, _sentence(ask)
+    subject = "the dependency" if denied == 1 else f"the {denied} dependencies"
+    remedy = DEPENDENCY_NOT_ALLOWED.bind(packages=" ".join(packages), subject=subject)
+    return remedy, _sentence(f"{remedy.clause()}, or {ask}")
+
+
 # A file whose deployment no receipt or locked render proves (#4360).
 KEPT_UNPROVEN_REASON = (
     "no local deployment receipt or render of the locked package version proves APM deployed it"
@@ -184,6 +204,8 @@ RESTORE_EDITED = _entry(
 # A managed file install kept because it may hold local edits (#4360, #4504).
 # Never 'apm install --force': it also deploys despite critical findings (RA-008).
 KEPT_FILE_RESTORE = _entry("kept-file-restore", "apm install", "restore it", before="move it aside")
+# A skill copy a --target-narrowed install kept stale in an inactive target (#4692).
+KEPT_SKILL_REFRESH = _entry("kept-skill-refresh", "apm install --target {targets}", "refresh it")
 # Files an APM before 0.37 rendered, kept as committed by a frozen replay (#4398).
 LEGACY_RENDER_MIGRATE = _entry(
     "legacy-render-migrate",
@@ -351,6 +373,12 @@ UNINSTALL_EVIDENCE_REMOVE = _entry(
     "apm uninstall",
     "finish the uninstall",
     before="if the source is unreachable, move each listed file aside or delete it",
+)
+UNINSTALL_EVIDENCE_TRUST_LOCKFILE = _entry(
+    "uninstall-evidence-trust-lockfile",
+    "apm uninstall {packages} --trust-lockfile",
+    "delete the files marked deletable and keep the rest",
+    before="if the source is gone for good",
 )
 # -- end W2 integration --
 # -- W2 marketplace --
@@ -1234,6 +1262,13 @@ REQUIRED_PACKAGE_UNLOCKED = _entry(
 UNMANAGED_FILE_TRACK = _entry("unmanaged-file-track", "apm install <ref>", "track a flagged file")
 CONTENT_HASHES_MISSING = _entry(
     "content-hashes-missing", "apm install", "regenerate the missing content hashes"
+)
+# {packages}: the apm.yml entries that bring in the denied dependencies;
+# {subject}: "the dependency" or "the N dependencies" (#4570).
+DEPENDENCY_NOT_ALLOWED = _entry(
+    "dependency-not-allowed",
+    "apm uninstall {packages}",
+    "remove {subject} outside the org allow list",
 )
 FROZEN_HOOK_PINS_STALE = _entry(
     "frozen-hook-pins-stale",

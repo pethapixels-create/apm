@@ -38,13 +38,18 @@ from ..utils.archive import (
     write_zip_archive,
 )
 from ..utils.atomic_io import write_text_lf
-from ..utils.console import _rich_warning
+from ..utils.console import _rich_info, _rich_warning
 from ..utils.path_security import PathTraversalError, ensure_path_within, safe_rmtree
 from ..utils.paths import portable_relpath
 from .attest import verify_attested_file
 from .credential_files import refuse_credential_files
 from .packer import PackResult
-from .plugin_layout import PLUGIN_ROOT_DIRS, find_plugin_root_sources
+from .plugin_layout import (
+    PLUGIN_ROOT_DIRS,
+    deployed_rendering_extension,
+    duplicate_plugin_renderings,
+    find_plugin_root_sources,
+)
 
 # ---------------------------------------------------------------------------
 # Path helpers
@@ -163,8 +168,12 @@ def _collect_apm_components(
     # agents/ -> agents/
     _collect_flat(apm_dir / "agents", "agents", components, skipped=skipped_links)
 
-    # skills/ -> skills/ (preserve sub-directory structure)
-    _collect_recursive(apm_dir / "skills", "skills", components, skipped=skipped_links)
+    # skills/ -> skills/ (preserve sub-directory structure). When .apm/ authors
+    # no skill, the root skills/ install deploys is packed instead (#4709).
+    if _packs_root_skills(apm_dir.parent):
+        _collect_recursive(apm_dir.parent / "skills", "skills", components, skipped=skipped_links)
+    else:
+        _collect_recursive(apm_dir / "skills", "skills", components, skipped=skipped_links)
 
     # prompts/ -> commands/ (rename .prompt.md -> .md)
     _collect_recursive(
@@ -184,6 +193,30 @@ def _collect_apm_components(
     _collect_recursive(apm_dir / "extensions", "extensions", components, skipped=skipped_links)
 
     return components
+
+
+def _packs_root_skills(package_root: Path) -> bool:
+    """Whether pack takes skills from root ``skills/`` beside an ``.apm/`` tree.
+
+    Only when ``.apm/skills/`` authors no skill and the root ``skills/`` holds
+    one: the skills a path install deploys then come from the root (see
+    ``SkillIntegrator.skill_source_paths``). With skills in both, ``.apm/``
+    stays the publishing source and the root directory is reported skipped.
+    """
+    from ..integration.skill_integrator import SkillIntegrator
+
+    root = package_root / "skills"
+    authored = package_root / ".apm" / "skills"
+    # A skill is a directory holding a SKILL.md file, as install counts them.
+    if root.is_symlink() or (
+        authored.is_dir()
+        and any(child.is_dir() and (child / "SKILL.md").is_file() for child in authored.iterdir())
+    ):
+        return False
+    return any(
+        source.parent == root
+        for source in SkillIntegrator.skill_source_paths(package_root).values()
+    )
 
 
 def _collect_root_plugin_components(
@@ -230,6 +263,8 @@ def _warn_skipped_source_links(project_root: Path, links: list[Path], logger=Non
 def _warn_skipped_root_components(project_root: Path, logger=None) -> None:
     """Explain why plugin-native root sources are not packed."""
     for source in find_plugin_root_sources(project_root):
+        if source == "skills" and _packs_root_skills(project_root):
+            continue
         if source == "hooks.json":
             message = (
                 "Skipping root-level hooks.json because .apm/ is present. "
@@ -1063,6 +1098,7 @@ def export_plugin_bundle(
     #    file_map: output_rel_posix -> (source_abs, owner_name)
     file_map: dict[str, tuple[Path, str]] = {}
     collisions: list[str] = []
+    dropped_renderings: list[str] = []
     merged_hooks: dict = {}
     merged_mcp: dict = {}
 
@@ -1117,6 +1153,9 @@ def export_plugin_bundle(
             # shared settings is not surprised by the exclusion.
             _warn_unpacked_dependency_config(dep, install_path, dep_components, logger)
 
+            dep_components = _drop_duplicate_renderings(
+                dep_components, project_root, dropped_renderings
+            )
             _merge_file_map(file_map, dep_components, dep_name, force, collisions)
 
     # 6. Collect own components according to the local source authority.
@@ -1164,6 +1203,7 @@ def export_plugin_bundle(
     ):
         _warn_no_local_primitives(logger)
 
+    own_components = _drop_duplicate_renderings(own_components, project_root, dropped_renderings)
     _merge_file_map(file_map, own_components, pkg_name, force, collisions)
     hook_resources.validate_outputs(
         file_map,
@@ -1198,7 +1238,8 @@ def export_plugin_bundle(
         else:
             _rich_warning(message, symbol="warning")
 
-    # 7. Emit collision warnings
+    # 7. Name the dropped renderings, then emit collision warnings
+    _report_dropped_renderings(dropped_renderings, logger)
     for msg in collisions:
         if logger:
             logger.warning(msg)
@@ -1319,8 +1360,41 @@ def export_plugin_bundle(
 
 
 # ---------------------------------------------------------------------------
-# Collision handling
+# Rendering selection and collision handling
 # ---------------------------------------------------------------------------
+
+
+def _drop_duplicate_renderings(
+    components: list[tuple[Path, str]], project_root: Path, dropped: list[str]
+) -> list[tuple[Path, str]]:
+    """Keep one rendering per primitive of one package (#3686).
+
+    A multi-target install deploys a primitive once per target (for example
+    ``.claude/agents/rv.md`` and ``.github/agents/rv.agent.md``); the bundle
+    carries only the rendering :mod:`.plugin_layout` prefers. Each file's
+    deployed path names the target that rendered it.
+    """
+    duplicates = duplicate_plugin_renderings(
+        {
+            rel: deployed_rendering_extension(portable_relpath(source, project_root))
+            for source, rel in components
+        }
+    )
+    dropped.extend(sorted(duplicates))
+    return [component for component in components if component[1] not in duplicates]
+
+
+def _report_dropped_renderings(dropped: list[str], logger=None) -> None:
+    """Name every per-target duplicate rendering pack left out, on one line."""
+    if not dropped:
+        return
+    message = "Packed one rendering per primitive; dropped per-target duplicates: " + ", ".join(
+        dict.fromkeys(dropped)
+    )
+    if logger:
+        logger.info(message)
+    else:
+        _rich_info(message, symbol="info")
 
 
 def _merge_file_map(

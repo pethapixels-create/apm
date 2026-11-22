@@ -19381,9 +19381,8 @@
    "family": "pair",
    "issue": "#4101",
    "lane": "T-6b",
-   "status": "known-failing",
+   "status": "required",
    "strength": "e2e",
-   "tracking": "#4685",
    "witness": "tests/lifecycle/scenarios/test_ownership_siblings.py::test_a_users_file_at_the_plugin_bin_path_refuses_the_plugin"
   },
   "pair|PRIM=bin|DRYRUN=on": {
@@ -20153,9 +20152,8 @@
    "family": "pair",
    "issue": "#4101",
    "lane": "T-6b",
-   "status": "known-failing",
+   "status": "required",
    "strength": "e2e",
-   "tracking": "#4697",
    "witness": "tests/lifecycle/scenarios/test_ownership_siblings.py::test_a_users_lsp_entry_is_never_taken_over"
   },
   "pair|PRIM=lsp|DRYRUN=on": {
@@ -22251,9 +22249,8 @@
    "family": "pair",
    "issue": "#4101",
    "lane": "T-6b",
-   "status": "known-failing",
+   "status": "required",
    "strength": "e2e",
-   "tracking": "#4634",
    "witness": "tests/lifecycle/scenarios/test_ownership_siblings.py::test_a_local_bundle_never_replaces_the_users_hook[present-provenance-unknown]"
   },
   "pair|SRC=local-bundle|DEPLOYED=unowned": {
@@ -27366,7 +27363,7 @@
   "E3": {
    "evidence": [
     "src/apm_cli/install/services.py:827",
-    "src/apm_cli/install/services.py:1016"
+    "src/apm_cli/install/services.py:1026"
    ],
    "text": "file primitives are equivalent except compile-staging routing (FILEROUTE)"
   },
@@ -27392,7 +27389,7 @@
    "evidence": [
     "src/apm_cli/commands/marketplace/__init__.py:372",
     "docs/src/content/docs/reference/cli/marketplace.md:292",
-    "docs/src/content/docs/consumer/installing-from-marketplaces.md:112"
+    "docs/src/content/docs/consumer/installing-from-marketplaces.md:124"
    ],
    "text": "marketplace commands act on catalogs, never on deployed primitives: add, list, browse, update, remove and validate read or refresh the catalog cache, and the authoring commands edit the marketplace block; a primitive reaches a project only through install of plugin@marketplace (OP=install, SRC=marketplace-*). Every OP=marketplace x PRIM cell but the org-policy GATE level (U2 no-collapse) maps onto one rule cell witnessed at the allowed and the revoked GATE level (deployed surfaces and the lock byte-identical)"
   },

@@ -85,8 +85,8 @@ ACCEPTS_EVIDENCE: Mapping[str, tuple[Ev, ...]] = {
         Ev("src/apm_cli/commands/update.py", 710, '"--target"'),
     ),
     "uninstall": (
-        Ev("src/apm_cli/commands/uninstall/cli.py", 853, 'argument("packages"'),
-        Ev("src/apm_cli/commands/uninstall/cli.py", 855, '"--dry-run"'),
+        Ev("src/apm_cli/commands/uninstall/cli.py", 904, 'argument("packages"'),
+        Ev("src/apm_cli/commands/uninstall/cli.py", 906, '"--dry-run"'),
     ),
     "prune": (
         Ev("src/apm_cli/commands/prune.py", 85, '"--dry-run"'),
@@ -110,9 +110,9 @@ ACCEPTS_EVIDENCE: Mapping[str, tuple[Ev, ...]] = {
         Ev(_APPROVE, 329, 'argument("packages"'),
     ),
     "audit": (
-        Ev("src/apm_cli/commands/audit.py", 1431, 'argument("package"'),
-        Ev("src/apm_cli/commands/audit.py", 1450, '"--dry-run"'),
-        Ev("src/apm_cli/commands/audit.py", 1488, '"--no-policy"'),
+        Ev("src/apm_cli/commands/audit.py", 1441, 'argument("package"'),
+        Ev("src/apm_cli/commands/audit.py", 1460, '"--dry-run"'),
+        Ev("src/apm_cli/commands/audit.py", 1498, '"--no-policy"'),
     ),
     "marketplace": (
         Ev("src/apm_cli/commands/marketplace/__init__.py", 372, "def add(source, name"),
@@ -154,14 +154,14 @@ USER_SCOPE_OPS = frozenset(
 USER_SCOPE_EVIDENCE: Mapping[str, Ev] = {
     "install": Ev(_INSTALL, 933, '"--global"'),
     "update": Ev("src/apm_cli/commands/update.py", 675, '"--global"'),
-    "uninstall": Ev("src/apm_cli/commands/uninstall/cli.py", 861, '"--global"'),
+    "uninstall": Ev("src/apm_cli/commands/uninstall/cli.py", 920, '"--global"'),
     "compile": Ev(_COMPILE, 1396, '"--global"'),
     "lock": Ev("src/apm_cli/commands/lock.py", 107, '"--global"'),
     "approve-deny": Ev(_APPROVE, 239, '"--user"'),
     # U5: pack has no --global (options 163-301).
     "pack": Ev(_PACK, 177, '@click.command(name="pack"'),
     "prune": Ev("src/apm_cli/commands/prune.py", 92, "def prune(ctx, dry_run)"),
-    "audit": Ev("src/apm_cli/commands/audit.py", 1552, "def audit("),
+    "audit": Ev("src/apm_cli/commands/audit.py", 1562, "def audit("),
     "marketplace": Ev("src/apm_cli/commands/marketplace/__init__.py", 372, "def add(source, name"),
 }
 
@@ -260,7 +260,7 @@ RULES: Mapping[str, tuple[str, tuple[Ev, ...]]] = {
             Ev("docs/src/content/docs/reference/cli/marketplace.md", 292, "apm marketplace update"),
             Ev(
                 "docs/src/content/docs/consumer/installing-from-marketplaces.md",
-                112,
+                124,
                 "refreshes the cached",
             ),
         ),
@@ -316,7 +316,7 @@ RULES: Mapping[str, tuple[str, tuple[Ev, ...]]] = {
         "file primitives are equivalent except compile-staging routing (FILEROUTE)",
         (
             Ev("src/apm_cli/install/services.py", 827, "staged_files"),
-            Ev("src/apm_cli/install/services.py", 1016, '"instructions" not in target.primitives'),
+            Ev("src/apm_cli/install/services.py", 1026, '"instructions" not in target.primitives'),
         ),
     ),
 }
