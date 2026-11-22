@@ -37,7 +37,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Collection, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 
 import pytest
