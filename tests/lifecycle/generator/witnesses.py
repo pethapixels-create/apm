@@ -310,6 +310,7 @@ SCENARIO_MODULES = (
     "test_file_routing",
     "test_graph_version",
     "test_history_upgrade",
+    "test_host_identity_pairs",
     "test_network_offline",
     "test_ownership_siblings",
     "test_pack_lock_states",

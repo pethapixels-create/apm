@@ -802,6 +802,9 @@ NEWER_LOCK = ExpectedRefusal(
 )
 NEWER_LOCK_REFUSALS = (
     "T4|OP=pack|SCOPE=project|LOCK=newer-generator",
+    "pair|LOCK=newer-generator|HOSTID=bare-default",
+    "pair|LOCK=newer-generator|HOSTID=proxy-logical",
+    "pair|LOCK=newer-generator|HOSTID=qualified-host-port",
     "pair|OP=pack|LOCK=newer-generator",
     "pair|SCOPE=project|LOCK=newer-generator",
 )
