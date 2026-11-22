@@ -14,6 +14,7 @@ vacuously. Rows whose promise is under private tracking are strict xfail.
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 import yaml
@@ -57,8 +58,8 @@ def _skill(factory: LocalPackageFactory, package, name: str) -> None:
     )
 
 
-def _transitive_self_defined_server(world) -> str:
-    """t-parent -> t-child; t-child declares a self-defined stdio MCP server. Returns t-parent."""
+def _transitive_self_defined_server(world) -> tuple[str, Path]:
+    """t-parent -> t-child; t-child declares a self-defined stdio MCP server."""
     factory = LocalPackageFactory(world.root / "g1")
     server = {
         "name": _SERVER,
@@ -71,7 +72,37 @@ def _transitive_self_defined_server(world) -> str:
     _skill(factory, child, "t-child")
     parent = factory.create("t-parent", version="1.0.0", dependencies=["../t-child"])
     _skill(factory, parent, "t-parent")
-    return str(parent.root)
+    return str(parent.root), Path(child.root).resolve()
+
+
+def _gate_off(world) -> None:
+    """A project with no ``executables`` block: the default executables gate is off."""
+    manifest = world.project / "apm.yml"
+    data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+    data.pop("executables", None)
+    manifest.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+
+def _approved_install(world, parent: str, child: Path):
+    """Install (the server parks), approve the transitive package, install again."""
+    first = driver.run(world, ["install", parent])
+    assert first.returncode == 0, _text(first)
+    approve = driver.run(world, ["approve", f"local:{child}"])
+    assert approve.returncode == 0, _text(approve)
+    return driver.run(world, ["install"])
+
+
+def _no_transitive_trust(world) -> None:
+    _serve_policy(
+        world,
+        "policy-g1-no-transitive-trust",
+        {
+            "name": "g1",
+            "version": "1.0",
+            "enforcement": "block",
+            "mcp": {"trust_transitive": False},
+        },
+    )
 
 
 def _configured(world, name: str) -> bool:
@@ -92,7 +123,8 @@ def _text(result) -> str:
 def test_trust_transitive_control_the_flag_admits_a_transitive_server(lifecycle_world) -> None:
     """Control: with no opinion on transitive trust, the one-run flag deploys the server."""
     use_policy(lifecycle_world, "allow")
-    parent = _transitive_self_defined_server(lifecycle_world)
+    _gate_off(lifecycle_world)
+    parent, _child = _transitive_self_defined_server(lifecycle_world)
     result = driver.run(lifecycle_world, ["install", parent, "--trust-transitive-mcp"])
     assert result.returncode == 0, _text(result)
     assert _configured(lifecycle_world, _SERVER), _text(result)
@@ -100,22 +132,37 @@ def test_trust_transitive_control_the_flag_admits_a_transitive_server(lifecycle_
 
 @pytest.mark.xfail(strict=True, reason=f"G1 policy promise: {_PRIVATE}")
 def test_trust_transitive_false_refuses_the_one_run_flag(lifecycle_world) -> None:
-    """mcp.trust_transitive: false -- a transitive server is not admitted by the one-run flag."""
-    _serve_policy(
-        lifecycle_world,
-        "policy-g1-no-transitive-trust",
-        {
-            "name": "g1",
-            "version": "1.0",
-            "enforcement": "block",
-            "mcp": {"trust_transitive": False},
-        },
-    )
-    parent = _transitive_self_defined_server(lifecycle_world)
+    """mcp.trust_transitive: false -- the one-run flag does not admit a transitive server."""
+    _no_transitive_trust(lifecycle_world)
+    _gate_off(lifecycle_world)
+    parent, _child = _transitive_self_defined_server(lifecycle_world)
     result = driver.run(lifecycle_world, ["install", parent, "--trust-transitive-mcp"])
     assert result.returncode == 1, _text(result)
     assert "trust_transitive" in _text(result), _text(result)
     assert not _configured(lifecycle_world, _SERVER), _text(result)
+
+
+def test_trust_transitive_control_an_approval_admits_a_transitive_server(lifecycle_world) -> None:
+    """Control: with no opinion on transitive trust, an approval deploys the server."""
+    use_policy(lifecycle_world, "allow")
+    parent, child = _transitive_self_defined_server(lifecycle_world)
+    result = _approved_install(lifecycle_world, parent, child)
+    assert result.returncode == 0, _text(result)
+    assert _configured(lifecycle_world, _SERVER), _text(result)
+
+
+@pytest.mark.xfail(strict=True, reason=f"G1 policy promise: {_PRIVATE}")
+def test_trust_transitive_false_refuses_an_approved_transitive_server(lifecycle_world) -> None:
+    """mcp.trust_transitive: false -- an approval alone does not admit a transitive server."""
+    _no_transitive_trust(lifecycle_world)
+    parent, child = _transitive_self_defined_server(lifecycle_world)
+    result = _approved_install(lifecycle_world, parent, child)
+    assert result.returncode == 1, _text(result)
+    assert "trust_transitive" in _text(result), _text(result)
+    assert not _configured(lifecycle_world, _SERVER), _text(result)
+    audit = driver.run(lifecycle_world, ["audit", "--ci"])
+    assert audit.returncode == 1, _text(audit)
+    assert _SERVER in _text(audit), _text(audit)
 
 
 # -- G2: manifest.content_types (policy-schema.md, manifest section) ---------------
