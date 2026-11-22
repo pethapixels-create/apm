@@ -10,6 +10,7 @@ owners of git-remote reading and URL parsing.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from urllib.parse import urlparse
@@ -42,7 +43,45 @@ class AmbiguousGitRemoteError(ValueError):
         )
 
 
+# Environment that points git at a repository other than the one discovered
+# from the working directory.
+_GIT_LOCATION_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
+
+
+def _outside_any_repository(project_root: Path) -> bool:
+    """True only when git would answer "not a git repository" from *project_root*.
+
+    git discovers a repository by walking up from the working directory: a
+    ``.git`` entry (directory or gitfile), or a directory that is itself a
+    bare repository (``HEAD``, ``objects/`` and ``refs/``). When none of the
+    walked directories qualifies and no environment variable names one, every
+    ``git remote`` call fails, so it need not be spawned. This reads no git
+    configuration; any doubt answers False and git runs.
+    """
+    if any(os.environ.get(name) for name in _GIT_LOCATION_ENV):
+        return False
+    try:
+        start = Path(project_root).absolute()
+    except OSError:
+        return False
+    for directory in (start, *start.parents):
+        try:
+            if os.path.lexists(directory / ".git"):
+                return False
+            if (
+                os.path.lexists(directory / "HEAD")
+                and os.path.isdir(directory / "objects")
+                and os.path.isdir(directory / "refs")
+            ):
+                return False
+        except OSError:
+            return False
+    return True
+
+
 def _git(project_root: Path, *args: str) -> str | None:
+    if _outside_any_repository(project_root):
+        return None
     try:
         result = subprocess.run(
             [get_git_executable(), *args],

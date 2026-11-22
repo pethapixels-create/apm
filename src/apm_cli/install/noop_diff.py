@@ -77,8 +77,8 @@ def _policy_admits(project_root: Path) -> tuple[bool, Any]:
 def _copies_valid(project_root: Path, lock: Any) -> bool:
     """Every locked remote package copy exists and proves its locked content."""
     from apm_cli.constants import APM_MODULES_DIR
-    from apm_cli.deps.lockfile import get_lockfile_path
-    from apm_cli.install.audit_replay import _live_copies_stale
+    from apm_cli.drift import locked_copy_is_stale
+    from apm_cli.install.source_helpers import locked_content_mismatch
 
     modules = project_root / APM_MODULES_DIR
     for key, dep in lock.dependencies.items():
@@ -87,25 +87,73 @@ def _copies_valid(project_root: Path, lock: Any) -> bool:
         if getattr(dep, "source", None) is not None:
             return False  # local, registry, marketplace: the full pipeline decides
         try:
-            if not dep.to_dependency_ref().get_install_path(modules).is_dir():
-                return False
+            path = dep.to_dependency_ref().get_install_path(modules)
         except (ValueError, OSError):
             return False
-    stale, _ = _live_copies_stale(modules, get_lockfile_path(project_root))
-    return not stale
+        if not path.is_dir() or locked_copy_is_stale(dep, path):
+            return False
+        if locked_content_mismatch(key, dep, path, lockfile=lock):
+            return False
+    return True
 
 
-def _audit_passes(project_root: Path, fetch: Any) -> bool:
+def _deployed_state_current(project_root: Path, lock: Any, manifest: Any, fetch: Any) -> str | None:
+    """The audit owner's narrow checks, on one parsed lock and manifest; None when all pass.
+
+    Deployed bytes are proven by content hash against the lock (the bytes
+    install scanned and deployed); the audit's hidden-Unicode sweep of
+    unrecorded files under the deploy trees is an audit concern, not an
+    install step, so it is not part of a no-op.
+    """
+    from apm_cli.constants import APM_MODULES_DIR
     from apm_cli.install.exec_gate import exec_policy_from_discovery
-    from apm_cli.policy.ci_checks import run_baseline_checks
+    from apm_cli.policy import ci_checks as ci
 
-    result = run_baseline_checks(
-        project_root,
-        fail_fast=True,
-        ci_mode=True,
-        policy_provider=lambda: exec_policy_from_discovery(lambda: fetch),
+    root, user_scope, targets = ci.resolve_audit_scope(project_root, lock)
+    if user_scope or root != project_root:
+        return "scope"
+    checks = (
+        lambda: ci._check_ref_consistency(manifest, lock),
+        lambda: ci._check_deployment_ledger_owners(lock),
+        lambda: ci._check_deployed_files_present(root, lock, targets),
+        lambda: ci._check_no_orphans(manifest, lock),
+        lambda: ci._check_lockfile_targets_current(project_root, lock, user_scope=False),
+        lambda: ci._check_skill_subset_consistency(manifest, lock, project_root),
+        lambda: ci._check_config_consistency(manifest, lock),
+        lambda: ci._check_native_mcp_ownership(project_root, lock, targets, user_scope=False),
+        lambda: ci._check_local_bundle_hooks(
+            root, lock, manifest, targets, user_scope=False, no_policy=False
+        ),
+        lambda: ci._check_hook_approval_pins(
+            project_root,
+            root,
+            lock,
+            manifest,
+            user_scope=False,
+            no_policy=False,
+            prepared_replay=None,
+            targets=targets,
+        ),
+        lambda: ci._check_exec_status_current(
+            project_root,
+            lock,
+            manifest,
+            targets,
+            user_scope=False,
+            modules_root=project_root / APM_MODULES_DIR,
+            policy_provider=lambda: exec_policy_from_discovery(lambda: fetch),
+        ),
     )
-    return result.passed and not any(getattr(c, "warned", False) for c in result.checks)
+    for check in checks:
+        result = check()
+        if not result.passed or getattr(result, "warned", False):
+            return result.name
+    drift, unresolved = ci.verify_deployed_file_hashes(root, lock, targets)
+    if drift or unresolved:
+        return "deployed file hash"
+    if lock.staged_hash_drift(project_root):
+        return "staged hash"
+    return None
 
 
 def _policy_checks_pass(project_root: Path, fetch: Any) -> bool:
@@ -118,22 +166,34 @@ def _policy_checks_pass(project_root: Path, fetch: Any) -> bool:
     return all(check.passed for check in result.checks)
 
 
-def up_to_date(project_root: Path) -> bool:
-    """Whether a plain install of *project_root* would change nothing."""
+def full_run_reason(project_root: Path) -> str | None:
+    """Why a plain install of *project_root* would change something; None if it would not."""
+    from apm_cli.core.scope import manifest_file
     from apm_cli.deps.lockfile import LockFile, get_lockfile_path, installed_apm_version
+    from apm_cli.models.apm_package import APMPackage
 
     lock = LockFile.read(get_lockfile_path(project_root))
-    if lock is None or lock.apm_version != installed_apm_version():
-        return False
-    if lock.lsp_servers or lock.local_deployed_files:
-        return False
+    if lock is None:
+        return "no lockfile"
+    if lock.apm_version != installed_apm_version():
+        return "lockfile from another APM version"
+    if lock.lsp_servers or lock.local_deployed_files or lock.local_staged_files:
+        return "local content or LSP"
+    manifest_path = manifest_file(project_root)
+    if not manifest_path.is_file():
+        return "no apm.yml"
+    manifest = APMPackage.from_apm_yml(manifest_path)
     admits, fetch = _policy_admits(project_root)
-    return (
-        admits
-        and _copies_valid(project_root, lock)
-        and _audit_passes(project_root, fetch)
-        and _policy_checks_pass(project_root, fetch)
-    )
+    if not admits:
+        return "org policy"
+    if not _copies_valid(project_root, lock):
+        return "package copies"
+    failed = _deployed_state_current(project_root, lock, manifest, fetch)
+    if failed:
+        return failed
+    if not _policy_checks_pass(project_root, fetch):
+        return "policy checks"
+    return None
 
 
 def invocation_argv() -> list[str] | None:
@@ -154,12 +214,28 @@ def try_noop(options: dict[str, Any], argv: list[str] | None, project_root: Path
     if not eligible(options, argv):
         return False
     try:
-        if not up_to_date(project_root):
-            return False
-    except Exception:
+        reason = full_run_reason(project_root)
+    except Exception as error:
+        reason = f"error {type(error).__name__}"
+    trace = os.environ.get(DISABLE_ENV, "").strip().lower() == "trace"
+    if reason is not None:
+        if trace:
+            _trace(f"[i] install fast path: full run ({reason})")
         return False
     from apm_cli.utils.console import _rich_info
 
     elapsed = time.perf_counter() - started
     _rich_info(f"No changes -- install state already up to date in {elapsed:.1f}s.", symbol="info")
+    if trace:
+        _trace("[i] install fast path: no-op (desired state already deployed)")
     return True
+
+
+def _trace(text: str) -> None:
+    import contextlib
+    import sys
+
+    from apm_cli.utils.console import ascii_safe
+
+    with contextlib.suppress(Exception):
+        sys.stderr.write(ascii_safe(text) + "\n")
