@@ -196,6 +196,44 @@ def test_trust_transitive_false_fails_audit_for_an_unlisted_transitive_server(
     assert name in _text(audit), _text(audit)
 
 
+# Policy activation (regent ruling): an explicit ``trust_transitive: false`` counts
+# as set; a policy that states nothing keeps no enforcement; any other non-default
+# field makes the default ``false`` apply. Shown on the registry path.
+_ACTIVATION = {
+    "explicit-false-alone": {"trust_transitive": False},
+    "default-under-another-field": {"deny": [_UNRELATED_DENY]},
+}
+
+
+def _activation_policy(world, case: str, mcp: dict | None) -> None:
+    document = {"name": "g1", "version": "1.0", "enforcement": "block"}
+    if mcp is not None:
+        document["mcp"] = mcp
+    _serve_policy(world, f"policy-g1-activation-{case}", document)
+
+
+def test_a_policy_that_states_nothing_keeps_transitive_servers_admitted(lifecycle_world) -> None:
+    """Control: a minimal policy is reported present but empty and enforces nothing."""
+    parent, child, _name = _author(lifecycle_world, "registry")
+    _activation_policy(lifecycle_world, "empty", None)
+    result = _install(lifecycle_world, "registry", parent, child)
+    assert result.returncode == 0, _text(result)
+    assert "present but empty" in _text(result), _text(result)
+    assert _configured(lifecycle_world, _CONFIGURED_NAME["registry"]), _text(result)
+
+
+@pytest.mark.xfail(strict=True, reason=f"G1 policy promise: {_PRIVATE}")
+@pytest.mark.parametrize("case", sorted(_ACTIVATION))
+def test_an_active_policy_refuses_an_unlisted_transitive_server(lifecycle_world, case) -> None:
+    """An explicit false, or the default false under any other non-default field, refuses."""
+    parent, child, _name = _author(lifecycle_world, "registry")
+    _activation_policy(lifecycle_world, case, _ACTIVATION[case])
+    result = _install(lifecycle_world, "registry", parent, child)
+    assert result.returncode == 1, _text(result)
+    assert "trust_transitive" in _text(result), _text(result)
+    assert not _configured(lifecycle_world, _CONFIGURED_NAME["registry"]), _text(result)
+
+
 # -- G2: manifest.content_types (policy-schema.md, manifest section) ---------------
 
 
