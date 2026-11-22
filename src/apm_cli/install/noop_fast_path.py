@@ -269,36 +269,38 @@ def _env_digest(names: list[str] | None, environ: dict[str, str] | None = None) 
 
 
 def policy_fingerprint(project_root: Path) -> str | None:
-    """Re-discover the org policy (unchanged freshness rules); ``None`` refuses the fast path.
+    """Re-discover and route the org policy live; ``None`` refuses the fast path.
 
-    Only outcomes whose routing output is constant qualify: a stale cache, a
-    fetch failure or a blocking outcome always takes the full pipeline.
+    Discovery keeps its unchanged cache-freshness rules, and the routed
+    decision comes from the canonical owner (``policy/outcome_routing.py``).
+    A blocking or unresolved route, a stale cache, a refresh failure or a
+    warning always takes the full pipeline, which reports it.
     """
-    from apm_cli.policy.discovery import discover_policy_with_chain, policy_disabled_by_env
+    from apm_cli.policy.discovery import policy_disabled_by_env
+    from apm_cli.policy.outcome_routing import classify_project_policy, discover_trust_policy
 
     if policy_disabled_by_env():
         return "disabled-by-env"
     try:
-        result = discover_policy_with_chain(project_root)
+        result = discover_trust_policy(project_root)
+        route = classify_project_policy(project_root, fetch_result=result)
     except Exception:
         return None
-    if result.cache_stale or result.fetch_error or result.error or result.warnings:
+    if route.blocks or route.unresolved:
         return None
-    if getattr(result, "unavailable_sources", None):
-        return None
-    if result.outcome not in {"found", "absent", "no_git_remote", "empty", "disabled"}:
+    if result.cache_stale or result.fetch_error or result.warnings:
         return None
     policy_bytes = b""
-    if result.policy is not None:
+    if route.policy is not None:
         try:
             from dataclasses import asdict, is_dataclass
 
-            data = asdict(result.policy) if is_dataclass(result.policy) else repr(result.policy)
+            data = asdict(route.policy) if is_dataclass(route.policy) else repr(route.policy)
             policy_bytes = json.dumps(data, sort_keys=True, default=repr).encode()
         except Exception:
             return None
     digest = hashlib.sha256(policy_bytes).hexdigest()
-    return f"{result.outcome}|{result.source}|{digest}"
+    return f"{route.outcome}|{route.kind}|{result.source}|{digest}"
 
 
 def deployed_hashes_intact(project_root: Path) -> bool:

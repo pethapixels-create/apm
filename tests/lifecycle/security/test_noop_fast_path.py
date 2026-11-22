@@ -35,6 +35,8 @@ from tests.lifecycle.world.scopes import use_policy
 from tests.lifecycle.world.services import ORG
 
 pytestmark = [
+    pytest.mark.e2e,
+    pytest.mark.integration,
     pytest.mark.promise("P-INV-I2", "P-INV-I4"),
     # The fast path never engages on Windows (os.path.exists is not observable there).
     pytest.mark.skipif(sys.platform == "win32", reason="no-op replay is POSIX-only"),

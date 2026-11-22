@@ -1,8 +1,9 @@
 """No-op install replay ownership guard (#4770).
 
 ``install/noop_fast_path.py`` owns the decision to replay a recorded no-op
-install. Its proof must keep the two live checks it adds on top of the
-recorded inputs: org policy re-discovery (``discover_policy_with_chain``) and
+install. Its proof must keep the live checks it adds on top of the
+recorded inputs: org policy re-discovery routed by the outcome owner
+(``discover_trust_policy`` + ``classify_project_policy``) and
 the lockfile content-hash verifier (``verify_deployed_file_hashes``). Only the
 ``apm install`` command (commands/install.py) may engage it, and no other
 module installs process-wide audit hooks.
@@ -28,7 +29,11 @@ _OWNER = "src/apm_cli/install/noop_fast_path.py"
 _ENGAGER = "src/apm_cli/commands/install.py"
 _SOURCE_TREE = "src/apm_cli/"
 _LIVE_CHECKS = (
-    (re.compile(r"\bdiscover_policy_with_chain\(project_root\)"), "live org policy discovery"),
+    (re.compile(r"\bdiscover_trust_policy\(project_root\)"), "live org policy discovery"),
+    (
+        re.compile(r"\bclassify_project_policy\(project_root, fetch_result=result\)"),
+        "the canonical policy outcome route",
+    ),
     (
         re.compile(r"\bverify_deployed_file_hashes\(project_root, lock\)"),
         "the lockfile deployed-file content-hash verifier",
