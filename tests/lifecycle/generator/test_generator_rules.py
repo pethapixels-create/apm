@@ -512,6 +512,7 @@ def _raw() -> dict[str, dict[str, str]]:
         ("U8", lambda cell: _u8(cell) is not None),
         ("U-BIN", lambda cell: _u_bin(cell)),
         ("U-MCPOWN-USER", _u_mcpown_user),
+        ("U-BIN-OPS", lambda cell: _u_bin_ops(cell)),
     ],
 )
 def test_definition_rule_removes_exactly_the_cells_its_text_names(rule, holds) -> None:
@@ -537,6 +538,31 @@ def test_u8_removals_split_by_the_source_each_command_takes() -> None:
     assert sum(clauses.values()) == 295
 
 
+def test_approve_never_scans_a_root_declared_mcp_server(lifecycle_world) -> None:
+    """R5 evidence for U-FIRST-PARTY-MCP: ``apm approve`` / ``apm deny`` decide only the
+    installed packages ``scan_installed_executable_packages`` finds, so approve-deny of an
+    MCP source maps onto the first-party rule cell. Fails if approve ever governs root MCP.
+    """
+    from apm_cli.commands.approve import scan_installed_executable_packages
+    from tests.lifecycle import driver
+    from tests.lifecycle.world import use_policy
+    from tests.lifecycle.world.packages import INERT_COMMAND
+
+    use_policy(lifecycle_world, "allow")
+    manifest = lifecycle_world.project / "apm.yml"
+    data = yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}
+    root = {"name": "p-root", "registry": False, "transport": "stdio", "command": INERT_COMMAND}
+    data["dependencies"] = {"apm": [lifecycle_world.packages["p-exec"].spec], "mcp": [root]}
+    manifest.write_text(yaml.safe_dump(data), encoding="utf-8")
+    result = driver.run(lifecycle_world, ("install",))
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert "p-root" in (lifecycle_world.project / ".mcp.json").read_text(encoding="utf-8")
+
+    declarations = scan_installed_executable_packages(manifest)
+    assert [d.package_name for d in declarations if d.mcp_count] == ["p-exec"], declarations
+    assert "p-root" not in repr(declarations)
+
+
 def test_executable_gate_levels_of_an_mcp_source_map_to_the_first_party_rule_cell() -> None:
     """U-FIRST-PARTY-MCP: the project's own MCP servers are never gated by executables.allow.
 
@@ -554,6 +580,16 @@ def test_executable_gate_levels_of_an_mcp_source_map_to_the_first_party_rule_cel
         cell_id("pair", {"SRC": src, "GATE": gate})
         for src in ("inline-mcp", "mcp-registry")
         for gate in executable
+    } | {
+        cell_id("T1", {"OP": "mcp-install", "PRIM": "mcp", "GATE": gate}) for gate in executable
+    } | {
+        # R5: approve / deny decide only installed packages (see the live scan test).
+        cell
+        for src in ("inline-mcp", "mcp-registry")
+        for cell in (
+            cell_id("pair", {"OP": "approve-deny", "SRC": src}),
+            cell_id("T3", {"OP": "approve-deny", "SRC": src, "PRIM": "mcp"}),
+        )
     }
     assert all(data["mapped"][key]["maps_to"] == FIRST_PARTY_MCP_CELL for key in mapped)
     rule = data["obligations"][FIRST_PARTY_MCP_CELL]
@@ -619,6 +655,40 @@ def _u_bin(cell) -> bool:
     return cell.get("PRIM") == "bin" and cell.get("SCOPE") == "project"
 
 
+def _u_bin_ops(cell) -> bool:
+    """A gate level of bin/ under a command bin/ never reaches; an org deny stays a cell."""
+    return (
+        set(cell) == {"OP", "PRIM", "GATE"}
+        and cell["PRIM"] == "bin"
+        and cell["OP"] in ("audit", "prune", "pack", "marketplace", "bundle-install")
+        and cell["GATE"] != "denied-dependency"
+    )
+
+
+def test_u_bin_ops_premises_hold_in_the_live_cli() -> None:
+    """Tripwire: U-BIN-OPS lapses the moment a premise changes in the source.
+
+    audit, prune, pack and every marketplace subcommand must keep no user-scope
+    form, and plugin_bin_deployable must keep requiring a marketplace plugin at
+    user scope (the U-BIN pin hashes that predicate); the closed-world pin of the
+    bin/ writer (security/u_bin.py) keeps a local bundle from ever writing bin/.
+    """
+    from click.testing import CliRunner
+
+    from apm_cli.cli import cli
+    from tests.lifecycle.security import u_bin
+
+    subcommands = ("package", "add", "list", "browse", "update", "remove", "audit", "check")
+    commands = [("audit",), ("prune",), ("pack",)]
+    commands += [("marketplace", name) for name in subcommands]
+    for words in commands:
+        result = CliRunner().invoke(cli, [*words, "--help"])
+        assert result.exit_code == 0, (words, result.output)
+        assert "--global" not in result.output and "-g," not in result.output, words
+    assert bin_pin.predicate_digest() == U_BIN_PIN
+    assert u_bin.pin_holds()
+
+
 def test_u_bin_pin_matches_the_predicate_and_is_recorded() -> None:
     assert bin_pin.predicate_digest() == U_BIN_PIN
     data = json.loads(_OBLIGATIONS.read_text(encoding="utf-8"))
@@ -656,3 +726,13 @@ def test_u_mcpown_user_holds_only_while_the_reader_ignores_user_scope(tmp_path) 
     assert project.names["vscode"] == {"srv"}, "the fixture lock carries a retired claim"
     user = claims(user_scope=True)
     assert not any(user.names.values()) and not any(user.hashes.values()), user
+
+
+def test_a_strict_only_spine_never_hides_a_passing_spine() -> None:
+    """The user-scope bin spine implies this pair only through strict #3703 cells and
+    sorts first by node id; the project matrix passes it, so it stays required."""
+    key = "pair|OP=install|GATE=denied-dependency"
+    entry = json.loads(_OBLIGATIONS.read_text(encoding="utf-8"))["obligations"][key]
+    assert entry["status"] == "required", entry
+    assert entry["witness"].endswith("test_gate_matrix_credits_op_prim_gate_cells[project]"), entry
+    assert "tracking" not in entry, entry
