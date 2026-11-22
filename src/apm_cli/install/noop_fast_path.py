@@ -772,13 +772,33 @@ def run_with_fast_path(
     if trace:
         sys.stderr.write(f"[i] install fast path: full run ({reason})\n")
     recording = _Recording(key, stamp_path, policy(), started, root)
-    with recording:
-        result = run()
+    try:
+        with recording:
+            result = run()
+    except BaseException as error:
+        # ``apm install`` ends with ``ctx.exit(code)``: only a clean exit 0 records.
+        if _exit_code(error) == 0:
+            _finish(recording, root, trace)
+        raise
+    _finish(recording, root, trace)
+    return result
+
+
+def _exit_code(error: BaseException) -> int | None:
+    from click.exceptions import Exit
+
+    if isinstance(error, Exit):
+        return error.exit_code
+    if isinstance(error, SystemExit):
+        return 0 if error.code in (None, 0) else 1
+    return None
+
+
+def _finish(recording: _Recording, root: Path, trace: bool) -> None:
     saved = recording.save(root)
     if trace:
         detail = "recorded" if saved else f"not recorded {recording.recorder.violations[:3]}"
         sys.stderr.write(f"[i] install fast path: {detail}\n")
-    return result
 
 
 def fast_path(command: Callable[..., Any]) -> Callable[..., Any]:

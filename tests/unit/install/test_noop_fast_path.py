@@ -158,3 +158,21 @@ def test_a_run_that_reads_an_expiring_cache_records_no_stamp(project) -> None:
     _install(run)
     _install(run)
     assert run.calls == 2
+
+
+@pytest.mark.parametrize("code, replayed", [(0, True), (1, False)])
+def test_only_a_clean_command_exit_records(project, code, replayed) -> None:
+    from click.exceptions import Exit
+
+    class _ExitingInstall(_Install):
+        def __call__(self) -> None:
+            super().__call__()
+            raise Exit(code)
+
+    run = _ExitingInstall(project)
+    for _ in range(2):
+        try:
+            _install(run)
+        except Exit as error:
+            assert error.exit_code == code
+    assert run.calls == (1 if replayed else 2)
