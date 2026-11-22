@@ -322,6 +322,7 @@ def test_install_after_a_change_equals_a_fresh_deploy(
             outside = _digest(incremental.root / "outside-skill", (), incremental)
     else:
         _apply_inputs(incremental, spec.start, spec.end)
+    held = _raw(incremental)
     after = _install(incremental)
 
     # The fresh twin: the same final inputs, the user's approval store included, no history.
@@ -338,23 +339,60 @@ def test_install_after_a_change_equals_a_fresh_deploy(
         f"\n--- incremental install\n{after.stdout}{after.stderr}"
         f"\n--- fresh install\n{reference.stdout}{reference.stderr}"
     )
-    # Both twins reach the same outcome: success, or the same refusal.
-    assert after.returncode == reference.returncode, evidence
-    if change == "symlinked-destination":
-        for world in (incremental, fresh):
-            assert _digest(world.root / "outside-skill", (), world) == outside, (
-                "install wrote through a symlinked destination" + evidence
-            )
+    if spec.pre_place is None:
+        assert after.returncode == reference.returncode == 0, evidence
     else:
-        assert after.returncode == 0, evidence
-    if user_bytes is not None:
-        for world, result in ((incremental, after), (fresh, reference)):
-            assert (world.project / _SKILL_PATH).read_bytes() == user_bytes, (
-                "install overwrote the user's file at a managed path" + evidence
-            )
-            said = " ".join(f"{result.stdout} {result.stderr}".split())
-            assert _KEPT.search(said), "install kept the user's file without saying so" + evidence
+        _assert_user_state_preserved(change, (incremental, after), (fresh, reference), evidence)
+        if change == "symlinked-destination":
+            for world in (incremental, fresh):
+                assert _digest(world.root / "outside-skill", (), world) == outside, (
+                    "install wrote through a symlinked destination" + evidence
+                )
+        if user_bytes is not None:
+            for world in (incremental, fresh):
+                assert (world.project / _SKILL_PATH).read_bytes() == user_bytes, (
+                    "install overwrote the user's file at a managed path" + evidence
+                )
+        if after.returncode != 0:
+            # A refused install keeps every byte it found (I7).
+            assert _raw(incremental) == held, "a refused install changed state" + evidence
+        if after.returncode != 0 or reference.returncode != 0:
+            return
     problems = _diff(
         _comparable(incremental, exempt), _comparable(fresh, exempt), (incremental, fresh)
     )
     assert not problems, f"{change}: incremental != fresh deploy\n" + "\n".join(problems) + evidence
+
+
+def _raw(world: World) -> dict[str, dict[str, str]]:
+    return {
+        "project": _digest(world.project, (".git",), world),
+        "home": _digest(world.home, _HOME_CACHES, world),
+    }
+
+
+def _said(result) -> str:
+    return " ".join(f"{result.stdout} {result.stderr}".split())
+
+
+def _assert_user_state_preserved(change: str, incremental, fresh, evidence: str) -> None:
+    """Both twins keep the user's state and say so; their outcomes may differ by provenance.
+
+    The incremental twin's receipts prove APM wrote the file, so it keeps the edit and
+    installs the rest. The fresh twin has no such evidence: the file is unmanaged, and
+    install may refuse the conflict instead. Either way nothing is overwritten silently.
+    """
+    for label, (_world, result) in (("incremental", incremental), ("fresh", fresh)):
+        said = _said(result)
+        if result.returncode == 0:
+            assert _KEPT.search(said), (
+                f"{label}: kept the user's state without saying so" + evidence
+            )
+        else:
+            assert "c-alpha" in said and "[x]" in said, (
+                f"{label}: refused without naming the destination" + evidence
+            )
+    if change == "symlinked-destination":
+        assert incremental[1].returncode == fresh[1].returncode, (
+            "the twins disagree on a symlinked destination" + evidence
+        )
