@@ -486,7 +486,7 @@ def _hand_written_file(world) -> None:
     ("case", "fields", "fails", "reported"),
     [
         ("deny", {"action": "deny"}, True, True),
-        ("warn", {"action": "warn"}, False, True),
+        ("warn", {"action": "warn"}, False, False),
         (
             "deny-excluded",
             {"action": "deny", "exclude": [".github/instructions/hand-*"]},
@@ -504,11 +504,14 @@ def test_unmanaged_files_policy_in_audit(lifecycle_world, case, fields, fails, r
     audit = driver.run(lifecycle_world, ["audit", "--ci"])
     text = _text(audit)
     assert (audit.returncode == 1) is fails, text
+    # deny names each file; warn reports only the count; exclude suppresses it.
     assert ("hand-written.instructions.md" in text) is reported, text
+    if case == "warn":
+        assert "1 unmanaged file(s) found (warn)" in text, text
     assert (lifecycle_world.project / _UNMANAGED).is_file()
 
 
-@pytest.mark.xfail(strict=True, reason="G7 policy promise: install-time deny (tracking pending)")
+@pytest.mark.xfail(strict=True, reason="#4826 unmanaged_files deny is applied by audit --ci only")
 def test_unmanaged_files_deny_blocks_an_install_that_would_leave_drift(lifecycle_world) -> None:
     """unmanaged_files.action: deny -- "deny blocks installs that would leave drift"."""
     _unmanaged_policy(lifecycle_world, "install-deny", action="deny")
