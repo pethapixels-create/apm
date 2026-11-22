@@ -97,12 +97,13 @@ def test_the_codex_hook_reads_the_skill_its_plugin_bundles(lifecycle_world) -> N
     if approval:
         approved = driver.run(world, ("approve", approval.group(1)))
         assert approved.returncode == 0, approved.stdout + approved.stderr
-        _install(world)
+        output += _install(world)
 
     hook = world.project / ".codex" / "hooks" / _PLUGIN / "hooks" / "session-start"
-    assert hook.is_file(), (
-        f"codex hook not deployed: {sorted(p.name for p in hook.parents[1].glob('*'))}"
+    codex = sorted(
+        p.relative_to(world.project).as_posix() for p in (world.project / ".codex").rglob("*")
     )
+    assert hook.is_file(), f"codex hook not deployed; .codex holds {codex}\n{output}"
     ran = subprocess.run(
         ["bash", str(hook)], cwd=world.project, capture_output=True, text=True, check=False
     )
