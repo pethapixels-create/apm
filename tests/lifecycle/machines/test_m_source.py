@@ -574,6 +574,7 @@ class SourceMachine(MachineBase):
         return ModelState(
             declared=frozenset(names),
             decisions=self.model.decisions,
+            revoked=self.model.revoked,
             targets=self.model.targets,
             exec_gate=self.model.exec_gate,
         )
