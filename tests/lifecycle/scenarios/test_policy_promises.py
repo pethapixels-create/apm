@@ -280,3 +280,78 @@ def test_content_types_allow_list_keeps_other_types_out(lifecycle_world) -> None
     result = driver.run(lifecycle_world, ["install", spec])
     assert not _instruction_deployed(lifecycle_world), _text(result)
     assert "content_types" in _text(result), _text(result)
+
+
+# -- G11: manifest.scripts (policy-schema.md, manifest section) --------------------
+
+
+def _scripts_deny(world) -> None:
+    _serve_policy(
+        world,
+        "policy-g11-scripts-deny",
+        {"name": "g11", "version": "1.0", "enforcement": "block", "manifest": {"scripts": "deny"}},
+    )
+
+
+def test_scripts_deny_accepts_a_manifest_without_scripts(lifecycle_world) -> None:
+    """Control: under scripts: deny a manifest with no scripts block is compliant."""
+    _scripts_deny(lifecycle_world)
+    audit = driver.run(lifecycle_world, ["audit", "--ci"])
+    assert "No scripts section (compliant with deny policy)" in _text(audit), _text(audit)
+
+
+def test_scripts_deny_fails_audit_for_a_scripts_block(lifecycle_world) -> None:
+    """manifest.scripts: deny -- a scripts block in apm.yml fails ``apm audit --ci``, named."""
+    _scripts_deny(lifecycle_world)
+    manifest = lifecycle_world.project / "apm.yml"
+    data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+    data["scripts"] = {"hello": "echo hello"}
+    manifest.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    before = manifest.read_bytes()
+    audit = driver.run(lifecycle_world, ["audit", "--ci"])
+    assert audit.returncode == 1, _text(audit)
+    assert "scripts-policy" in _text(audit), _text(audit)
+    assert "Scripts section present but denied by policy" in _text(audit), _text(audit)
+    assert manifest.read_bytes() == before
+
+
+# -- G6: mcp.self_defined (policy-schema.md, mcp section) ---------------------------
+
+_INLINE = ("install", "--mcp", "p-inline", "--", "apm-lifecycle-inert-server", "--stdio")
+
+
+def _self_defined(world, level: str) -> None:
+    _serve_policy(
+        world,
+        f"policy-g6-self-defined-{level}",
+        {"name": "g6", "version": "1.0", "enforcement": "block", "mcp": {"self_defined": level}},
+    )
+
+
+def test_self_defined_allow_installs_an_inline_server(lifecycle_world) -> None:
+    """Control: self_defined allow writes the inline server with no self-defined finding."""
+    _self_defined(lifecycle_world, "allow")
+    result = driver.run(lifecycle_world, list(_INLINE))
+    assert result.returncode == 0, _text(result)
+    assert _configured(lifecycle_world, "p-inline"), _text(result)
+
+
+def test_self_defined_warn_installs_an_inline_server_and_says_so(lifecycle_world) -> None:
+    """mcp.self_defined: warn -- the inline server is written and the warning names it."""
+    _self_defined(lifecycle_world, "warn")
+    result = driver.run(lifecycle_world, list(_INLINE))
+    assert result.returncode == 0, _text(result)
+    assert _configured(lifecycle_world, "p-inline"), _text(result)
+    assert "self-defined" in _text(result), _text(result)
+
+
+def test_self_defined_deny_refuses_an_inline_server(lifecycle_world) -> None:
+    """mcp.self_defined: deny -- the inline server is refused and nothing is written."""
+    _self_defined(lifecycle_world, "deny")
+    manifest = lifecycle_world.project / "apm.yml"
+    before = manifest.read_bytes()
+    result = driver.run(lifecycle_world, list(_INLINE))
+    assert result.returncode == 1, _text(result)
+    assert "self-defined" in _text(result), _text(result)
+    assert not _configured(lifecycle_world, "p-inline"), _text(result)
+    assert manifest.read_bytes() == before
