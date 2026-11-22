@@ -278,8 +278,9 @@ def test_content_types_allow_list_keeps_other_types_out(lifecycle_world) -> None
     )
     spec = _skill_and_instruction(lifecycle_world)
     result = driver.run(lifecycle_world, ["install", spec])
-    assert not _instruction_deployed(lifecycle_world), _text(result)
-    assert "content_types" in _text(result), _text(result)
+    output = " ".join((result.stdout + result.stderr).split())
+    assert not _instruction_deployed(lifecycle_world), output
+    assert "content_types" in output, output
 
 
 # -- G11: manifest.scripts (policy-schema.md, manifest section) --------------------
@@ -297,7 +298,8 @@ def test_scripts_deny_accepts_a_manifest_without_scripts(lifecycle_world) -> Non
     """Control: under scripts: deny a manifest with no scripts block is compliant."""
     _scripts_deny(lifecycle_world)
     audit = driver.run(lifecycle_world, ["audit", "--ci"])
-    assert "No scripts section (compliant with deny policy)" in _text(audit), _text(audit)
+    output = " ".join((audit.stdout + audit.stderr).split())
+    assert "No scripts section (compliant with deny policy)" in output, output
 
 
 def test_scripts_deny_fails_audit_for_a_scripts_block(lifecycle_world) -> None:
