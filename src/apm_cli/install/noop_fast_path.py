@@ -319,6 +319,8 @@ class _Recorder:
         excluded_roots: tuple[str, ...],
         scratch_roots: tuple[str, ...] = (),
         protected_roots: tuple[str, ...] = (),
+        expiring_roots: tuple[str, ...] = (),
+        immutable_roots: tuple[str, ...] = (),
     ) -> None:
         self.reads: set[str] = set()
         self.listed: set[str] = set()
@@ -329,6 +331,10 @@ class _Recorder:
         self.excluded_roots = excluded_roots
         self.scratch_roots = scratch_roots
         self.protected_roots = protected_roots
+        # Caches whose answer depends on the clock (TTL) are not replayable;
+        # content-addressed git buckets inside them are.
+        self.expiring_roots = expiring_roots
+        self.immutable_roots = immutable_roots
 
     def _path(self, value: Any) -> str | None:
         if isinstance(value, int) or value is None:
@@ -365,6 +371,8 @@ class _Recorder:
             if writes:
                 if not self._scratch(path):
                     self.violate(f"write:{path}")
+            elif _under(path, self.expiring_roots) and not _under(path, self.immutable_roots):
+                self.violate(f"expiring-cache:{path}")
             else:
                 self.reads.add(path)
         elif event in ("os.listdir", "os.scandir"):
@@ -489,10 +497,13 @@ class _Recording:
         excluded.add(str(Path(__file__).resolve().parents[1]))
         excluded.add(str(stamp.parent))
         excluded.update(_policy_cache_roots())
+        expiring, immutable = _cache_roots()
         self.recorder = _Recorder(
             _with_realpaths(excluded),
             _with_realpaths({tempfile.gettempdir()}),
             _with_realpaths({str(project_root)}),
+            _with_realpaths(expiring),
+            _with_realpaths(immutable),
         )
         self._saved: dict[str, Any] = {}
 
@@ -588,6 +599,17 @@ def _with_realpaths(roots: set[str]) -> tuple[str, ...]:
     paths = {os.path.abspath(root) for root in roots}
     paths.update(os.path.realpath(root) for root in list(paths))
     return tuple(sorted(paths))
+
+
+def _cache_roots() -> tuple[set[str], set[str]]:
+    """(expiring cache roots, content-addressed roots inside them)."""
+    from apm_cli.cache.paths import GIT_CHECKOUTS_BUCKET, GIT_DB_BUCKET, get_cache_root
+    from apm_cli.core.scope import get_apm_home
+
+    root = str(get_cache_root(ensure=False))
+    expiring = {root, str(get_apm_home() / "cache")}
+    immutable = {os.path.join(root, GIT_DB_BUCKET), os.path.join(root, GIT_CHECKOUTS_BUCKET)}
+    return expiring, immutable
 
 
 def _policy_cache_roots() -> set[str]:

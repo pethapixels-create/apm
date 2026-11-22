@@ -140,3 +140,19 @@ def test_only_a_plain_reinstall_is_eligible() -> None:
     for option in ("packages", "update", "refresh", "dry_run", "root", "global_"):
         assert fp.eligible({option: ("x",)}) is False
     assert fp.eligible({"mcp_name": "srv"}) is False
+
+
+def test_a_run_that_reads_an_expiring_cache_records_no_stamp(project) -> None:
+    cached = Path(os.environ["APM_CACHE_DIR"]) / "http_v1" / "entry"
+    cached.parent.mkdir(parents=True)
+    cached.write_text("fresh until the TTL ends", encoding="utf-8")
+
+    class _CachedInstall(_Install):
+        def __call__(self) -> None:
+            cached.read_text(encoding="utf-8")
+            super().__call__()
+
+    run = _CachedInstall(project)
+    _install(run)
+    _install(run)
+    assert run.calls == 2
