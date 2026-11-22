@@ -58,8 +58,6 @@ class Diff:
 
 def build_desired_state(project_root: Path) -> DesiredState | None:
     """Parse the lockfile and ``apm.yml`` once; ``None`` when either is absent."""
-    from apm_cli.core.deployment_ledger import DeploymentLedgerCodec
-    from apm_cli.core.deployment_state import LocatorKind
     from apm_cli.core.scope import manifest_file
     from apm_cli.deps.lockfile import LockFile, get_lockfile_path
     from apm_cli.models.apm_package import APMPackage
@@ -70,8 +68,18 @@ def build_desired_state(project_root: Path) -> DesiredState | None:
     if lock is None or not manifest_path.is_file():
         return None
     manifest = APMPackage.from_apm_yml(manifest_path)
-    ledger = DeploymentLedgerCodec.from_lockfile(lock)
     _root, _user_scope, targets = resolve_audit_scope(project_root, lock)
+    return state_from(project_root, lock, manifest, targets)
+
+
+def state_from(
+    project_root: Path, lock: Any, manifest: Any, targets: Sequence[Any]
+) -> DesiredState:
+    """The desired state of already parsed inputs (the pipeline holds them in ctx)."""
+    from apm_cli.core.deployment_ledger import DeploymentLedgerCodec
+    from apm_cli.core.deployment_state import LocatorKind
+
+    ledger = DeploymentLedgerCodec.from_lockfile(lock)
     files = tuple(
         DesiredFile(
             path=record.locator.value,
@@ -112,3 +120,62 @@ def actual_vs_desired(state: DesiredState) -> Diff:
         changed=tuple(sorted(d.path for d in drift)),
         unresolved=tuple(sorted(unresolved)),
     )
+
+
+EMPTY = "empty"
+APPLY = "apply"
+FULL = "full"
+
+# InstallContext options under which integrate must run in full.
+_FULL_RUN_OPTIONS = (
+    "update_refs",
+    "dry_run",
+    "lockfile_only",
+    "force",
+    "refresh",
+    "only_packages",
+    "skill_subset_from_cli",
+    "target_override",
+    "audit_override",
+    "trust_transitive_mcp",
+    "legacy_skill_paths",
+)
+
+
+def plan_for(ctx: Any) -> str:
+    """How the integrate phase may run for *ctx*: EMPTY, APPLY or FULL.
+
+    EMPTY only when the desired state is already deployed and every gate the
+    integrate phase applies would decide as recorded; any doubt is FULL. The
+    org policy is the one the pipeline already routed (``ctx.policy_fetch``).
+    APPLY is decided by the diff-apply owner (not yet wired).
+    """
+    from apm_cli.core.scope import is_user_scope
+    from apm_cli.deps.lockfile import installed_apm_version
+    from apm_cli.install import noop_diff as proof
+
+    try:
+        if proof.disabled() or any(getattr(ctx, name, None) for name in _FULL_RUN_OPTIONS):
+            return FULL
+        lock = ctx.existing_lockfile
+        root = Path(ctx.project_root)
+        if lock is None or is_user_scope(ctx.scope) or ctx.no_policy:
+            return FULL
+        if lock.apm_version != installed_apm_version():
+            return FULL
+        if lock.lsp_servers or lock.local_deployed_files or lock.local_staged_files:
+            return FULL
+        if not (
+            proof._copies_valid(root, lock)
+            and proof._install_audit_off()
+            and proof._sources_scan_clean(root, lock)
+        ):
+            return FULL
+        state = state_from(root, lock, ctx.apm_package, ctx.targets or ())
+        if not actual_vs_desired(state).empty:
+            return FULL
+        if proof._gates_current(state, ctx.policy_fetch) is not None:
+            return FULL
+    except Exception:
+        return FULL
+    return EMPTY
