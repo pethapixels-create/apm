@@ -41,7 +41,22 @@ _LIVE_CHECKS = (
     (re.compile(r"\bdeployed_hashes_intact\(project_root\)"), "the deployed-hash check on replay"),
 )
 _ENGAGE = re.compile(r"\bnoop_fast_path\b")
+# The decorator must sit directly on the install click callback.
+_DECORATED_INSTALL = re.compile(r"^@noop_fast_path$")
+_INSTALL_DEF = re.compile(r"^def install\(")
 _AUDIT_HOOK = re.compile(r"\bsys\.addaudithook\(")
+
+
+def _decorates_install(lines) -> bool:
+    """``@noop_fast_path`` is the decorator line right above ``def install(``."""
+    texts = [text.strip() for _, text in lines]
+    return (
+        any(
+            _INSTALL_DEF.match(texts[i]) and i > 0 and _DECORATED_INSTALL.match(texts[i - 1])
+            for i in range(len(texts))
+        )
+        and _count_re(lines, _DECORATED_INSTALL) == 1
+    )
 
 
 def check_noop_replay_owner(provider: FactsProvider) -> tuple[Violation, ...]:
@@ -57,8 +72,14 @@ def check_noop_replay_owner(provider: FactsProvider) -> tuple[Violation, ...]:
             findings.append(
                 _report(rule_id, _OWNER, f"a replayed no-op must re-run {what} exactly once")
             )
-    if _count_re(engager, _ENGAGE) < 1:
-        findings.append(_report(rule_id, _ENGAGER, "apm install must engage the no-op owner"))
+    if not _decorates_install(engager):
+        findings.append(
+            _report(
+                rule_id,
+                _ENGAGER,
+                "apm install's callback must be decorated with @noop_fast_path directly",
+            )
+        )
     others = _tree_python_paths(provider, _SOURCE_TREE, excluded=(_OWNER, _ENGAGER))
     findings.extend(
         _banned(

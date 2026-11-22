@@ -42,7 +42,6 @@ import re
 import stat
 import sys
 import tempfile
-import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -222,18 +221,32 @@ def _probe(path: str) -> list[Any] | None:
         return None
     except OSError as error:
         return [f"error:{error.errno}"]
-    entry: list[Any] = [stat.S_IFMT(info.st_mode), info.st_mode, info.st_size, info.st_mtime_ns]
+    entry: list[Any] = list(_identity(info))
     if stat.S_ISLNK(info.st_mode):
         try:
             entry.append(os.readlink(path))
         except OSError as error:
             entry.append(f"error:{error.errno}")
         try:
-            target = os.stat(path)
-            entry.append([stat.S_IFMT(target.st_mode), target.st_size, target.st_mtime_ns])
+            entry.append(list(_identity(os.stat(path))))
         except OSError as error:
             entry.append(f"error:{error.errno}")
     return entry
+
+
+def _identity(info: os.stat_result) -> tuple[int, ...]:
+    """Every stat field a trust or ownership check may read (not atime)."""
+    return (
+        info.st_mode,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+        info.st_ino,
+        info.st_dev,
+        info.st_nlink,
+        info.st_uid,
+        info.st_gid,
+    )
 
 
 def _listing(path: str) -> list[Any] | None:
@@ -243,7 +256,7 @@ def _listing(path: str) -> list[Any] | None:
             for entry in entries:
                 try:
                     info = entry.stat(follow_symlinks=False)
-                    rows.append([entry.name, info.st_mode, info.st_size, info.st_mtime_ns])
+                    rows.append([entry.name, *_identity(info)])
                 except OSError as error:
                     rows.append([entry.name, f"error:{error.errno}"])
     except FileNotFoundError:
@@ -257,6 +270,7 @@ def _listing(path: str) -> list[Any] | None:
 def _env_digest(names: list[str] | None, environ: dict[str, str] | None = None) -> str:
     environ = dict(os.environ) if environ is None else environ
     selected = sorted(environ) if names is None else sorted(set(names))
+    selected = [name for name in selected if name != _DISABLE_ENV]
     hasher = hashlib.sha256()
     for name in selected:
         value = environ.get(name)
@@ -329,13 +343,23 @@ _os_lstat = os.lstat
 _os_realpath = os.path.realpath
 
 
-def _snapshot(path: str) -> tuple[int, ...] | None:
-    """Identity of *path* when first observed; any later change refuses the stamp."""
+def _snapshot(path: str) -> tuple[Any, ...] | None:
+    """Identity of *path* (and of its referent, when a link) when first observed.
+
+    Any later change refuses the stamp, so the saved digest is bound to the
+    bytes the run consumed.
+    """
     try:
         info = _os_lstat(path)
     except OSError:
         return None
-    return (info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_ino)
+    if not stat.S_ISLNK(info.st_mode):
+        return _identity(info)
+    try:
+        referent: tuple[int, ...] | None = _identity(_os_stat(path))
+    except OSError:
+        referent = None
+    return (_identity(info), referent)
 
 
 class _Recorder:
@@ -361,7 +385,9 @@ class _Recorder:
         self.listed: set[str] = set()
         self.probed: set[str] = set()
         self.resolved: dict[str, str] = {}
-        self.observed: dict[str, tuple[int, ...] | None] = {}
+        self.observed: dict[str, Any] = {}
+        # Temp paths this invocation created: only these are scratch.
+        self.created: set[str] = set()
         self.env: set[str] = set()
         self.env_all = False
         self.violations: list[str] = []
@@ -387,8 +413,19 @@ class _Recorder:
     def _excluded(self, path: str) -> bool:
         return _under(path, self.excluded_roots)
 
-    def _scratch(self, path: str) -> bool:
+    def _in_temp(self, path: str) -> bool:
         return _under(path, self.scratch_roots) and not _under(path, self.protected_roots)
+
+    def _scratch(self, path: str) -> bool:
+        """Under a temp path this invocation created (its own output, never an input)."""
+        return bool(self.created) and self._in_temp(path) and _under(path, tuple(self.created))
+
+    def _create(self, path: str) -> bool:
+        """Record a new temp path; False when *path* is not an invocation-owned temp path."""
+        if not self._in_temp(path):
+            return False
+        self.created.add(path)
+        return True
 
     def _observe(self, path: str) -> None:
         if path not in self.observed:
@@ -430,7 +467,10 @@ class _Recorder:
         if writes:
             if path == os.devnull or path.startswith("/dev/fd/"):
                 return  # discarding output is not a write
-            if not self._scratch(path):
+            exclusive = (isinstance(mode, str) and "x" in mode) or bool(
+                isinstance(flags, int) and flags & os.O_CREAT and flags & os.O_EXCL
+            )
+            if not (self._scratch(path) or (exclusive and self._create(path))):
                 self.violate(f"write:{path}")
         elif self._scratch(path):
             return  # the run's own temporary files are outputs, not inputs
@@ -444,6 +484,10 @@ class _Recorder:
         """Every path a mutating event names must be scratch, excluded, or a no-op."""
         if _is_noop_write(event, args):
             return
+        if event == "os.mkdir" and args:
+            path = self._path(args[0])
+            if path is not None and self._create(path):
+                return
         named = [arg for arg in args if isinstance(arg, (str, bytes, os.PathLike))]
         if any(isinstance(arg, int) and not isinstance(arg, bool) for arg in args[1:]):
             if event not in ("os.chmod", "os.chown", "os.utime", "os.mkdir"):
@@ -695,14 +739,18 @@ class _Recording:
     def save(self, project_root: Path) -> bool:
         """Persist the stamp when the recorded run qualifies; return whether it did."""
         recorder = self.recorder
-        if recorder.violations or self.policy is None:
+        if recorder.violations:
             return False
         text = "".join(chunk for _, chunk in self.output)
         if len(_SUMMARY.findall(text)) != 1:
             return False
-        if policy_fingerprint(project_root) != self.policy:
-            return False
         if not self._inputs_held():
+            return False
+        if self.policy is None:
+            # This run was a no-op but carried no live policy view: mark the
+            # invocation pending so the next one records with it.
+            return self._write({"key": self.key, "pending": True})
+        if policy_fingerprint(project_root) != self.policy:
             return False
         output = [
             [channel, _SUMMARY.sub(_SUMMARY_PLACEHOLDER, chunk)] for channel, chunk in self.output
@@ -721,6 +769,9 @@ class _Recording:
             "resolved": {key: _resolution(key) for key in sorted(recorder.resolved)},
             "output": output,
         }
+        return self._write(stamp)
+
+    def _write(self, stamp: dict[str, Any]) -> bool:
         try:
             self.stamp.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(dir=self.stamp.parent, prefix=".stamp-")
@@ -797,12 +848,12 @@ def _stamp_mismatch(
     """
     checks: list[tuple[str, Callable[[], object]]] = [
         ("invocation", lambda: stamp.get("key") != key),
-        ("apm version", lambda: stamp.get("code") != _code_identity()),
         ("environment", lambda: stamp.get("env") != _env_digest(stamp.get("env_names"))),
         ("content", lambda: _first_changed(stamp.get("reads", {}), _file_digest)),
         ("listing", lambda: _first_changed(stamp.get("listed", {}), _listing)),
         ("path", lambda: _first_changed(stamp.get("probed", {}), _probe)),
         ("resolution", lambda: _first_changed(stamp.get("resolved", {}), _resolution)),
+        ("apm version", lambda: stamp.get("code") != _code_identity()),
         ("org policy", lambda: (lambda now: now is None or now != stamp.get("policy"))(policy())),
         ("deployed file hash", lambda: not deployed_hashes_intact(project_root)),
     ]
@@ -811,26 +862,6 @@ def _stamp_mismatch(
         if found:
             return reason if found is True else f"{reason} {found}"
     return None
-
-
-def _in_background(compute: Callable[[], str | None]) -> Callable[[], str | None]:
-    """Start *compute* on a thread (policy discovery waits on git); return its joiner."""
-    box: dict[str, Any] = {}
-
-    def target() -> None:
-        try:
-            box["value"] = compute()
-        except Exception:
-            box["value"] = None
-
-    thread = threading.Thread(target=target, name="apm-fast-path-policy", daemon=True)
-    thread.start()
-
-    def join() -> str | None:
-        thread.join()
-        return box.get("value")
-
-    return join
 
 
 def _replay(stamp: dict[str, Any], started: float) -> None:
@@ -855,6 +886,8 @@ def _load(path: Path) -> dict[str, Any] | None:
         return None
     if not isinstance(data, dict) or not isinstance(data.get("key"), dict):
         return None
+    if data.get("pending") is True:
+        return data
     if not all(isinstance(data.get(name), dict) for name in _STAMP_MAPS):
         return None
     if not isinstance(data.get("policy"), str) or not isinstance(data.get("env"), str):
@@ -884,12 +917,17 @@ def run_with_fast_path(
     if not (root / "apm.lock.yaml").is_file():
         return run()  # a first install is never a no-op
     trace = os.environ.get(_DISABLE_ENV, "").strip().lower() == "trace"
-    policy = _in_background(lambda: policy_fingerprint(root))
     stamp = _load(stamp_path)
-    reason = "no stamp"
-    if stamp is not None:
+    policy: str | None = None
+    if stamp is None:
+        reason = "no stamp"
+    elif stamp.get("pending"):
+        # The previous run was a no-op: record this one with the live policy view.
+        reason = "pending"
+        policy = policy_fingerprint(root)
+    else:
         try:
-            reason = _stamp_mismatch(stamp, key, policy, root)
+            reason = _stamp_mismatch(stamp, key, lambda: policy_fingerprint(root), root)
         except Exception as error:
             reason = f"error {type(error).__name__}"
         if reason is None:
@@ -897,9 +935,14 @@ def run_with_fast_path(
             if trace:
                 sys.stderr.write("[i] install fast path: replayed a verified no-op\n")
             return None
+    # A miss runs no live discovery of its own (only a pending invocation does):
+    # cold, warm and changed installs pay only the recorder.
     if trace:
         sys.stderr.write(f"[i] install fast path: full run ({reason})\n")
-    recording = _Recording(key, stamp_path, policy(), started, root)
+    return _run_recorded(run, _Recording(key, stamp_path, policy, started, root), root, trace)
+
+
+def _run_recorded(run: Callable[[], Any], recording: _Recording, root: Path, trace: bool) -> Any:
     try:
         with recording:
             result = run()
@@ -923,7 +966,12 @@ def _exit_code(error: BaseException) -> int | None:
 
 
 def _finish(recording: _Recording, root: Path, trace: bool) -> None:
-    saved = recording.save(root)
+    """Save the stamp; a recording failure never changes the install's own outcome."""
+    try:
+        saved = recording.save(root)
+    except Exception as error:
+        recording.recorder.violations.append(f"save failed: {type(error).__name__}")
+        saved = False
     if trace:
         detail = "recorded" if saved else f"not recorded {recording.recorder.violations[:3]}"
         sys.stderr.write(f"[i] install fast path: {detail}\n")
