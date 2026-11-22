@@ -74,7 +74,9 @@ def _policy_admits(project_root: Path) -> tuple[bool, Any]:
         return False, fetch
     # Output parity: any other outcome is announced by the full pipeline
     # (rule (a): a line the early exit does not render takes the full run).
-    if getattr(fetch, "outcome", None) != "absent":
+    from apm_cli.policy.outcome_routing import POLICY_NOT_PUBLISHED_OUTCOMES
+
+    if getattr(fetch, "outcome", None) not in POLICY_NOT_PUBLISHED_OUTCOMES:
         return False, fetch
     return True, fetch
 
