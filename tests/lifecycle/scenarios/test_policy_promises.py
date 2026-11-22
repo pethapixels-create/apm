@@ -432,3 +432,88 @@ def test_require_resolution_decides_a_pinned_required_package_mismatch(
         assert "version mismatch" in _text(audit), _text(audit)
     else:
         assert "version mismatch" not in _text(audit), _text(audit)
+
+
+# -- G5: compilation.source_attribution (policy-schema.md, compilation section) ----
+
+
+@pytest.mark.parametrize("enabled", [True, False], ids=["enabled", "missing"])
+def test_source_attribution_policy_requires_the_manifest_setting(lifecycle_world, enabled) -> None:
+    """compilation.source_attribution: true -- audit --ci fails unless apm.yml enables it."""
+    _serve_policy(
+        lifecycle_world,
+        f"policy-g5-attribution-{'on' if enabled else 'off'}",
+        {
+            "name": "g5",
+            "version": "1.0",
+            "enforcement": "block",
+            "compilation": {"source_attribution": True},
+        },
+    )
+    if enabled:
+        manifest = lifecycle_world.project / "apm.yml"
+        data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+        data["compilation"] = {"source_attribution": True}
+        manifest.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    audit = driver.run(lifecycle_world, ["audit", "--ci"])
+    if enabled:
+        assert "Source attribution enabled" in _text(audit), _text(audit)
+    else:
+        assert audit.returncode == 1, _text(audit)
+        assert "Source attribution required by policy but not enabled" in _text(audit), _text(audit)
+
+
+# -- G7: unmanaged_files (policy-schema.md, unmanaged_files section) ----------------
+
+_UNMANAGED = ".github/instructions/hand-written.instructions.md"
+
+
+def _unmanaged_policy(world, case: str, **fields) -> None:
+    _serve_policy(
+        world,
+        f"policy-g7-unmanaged-{case}",
+        {"name": "g7", "version": "1.0", "enforcement": "block", "unmanaged_files": fields},
+    )
+
+
+def _hand_written_file(world) -> None:
+    path = world.project / _UNMANAGED
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('---\napplyTo: "**"\n---\n\nWritten by hand.\n', encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("case", "fields", "fails", "reported"),
+    [
+        ("deny", {"action": "deny"}, True, True),
+        ("warn", {"action": "warn"}, False, True),
+        (
+            "deny-excluded",
+            {"action": "deny", "exclude": [".github/instructions/hand-*"]},
+            False,
+            False,
+        ),
+    ],
+    ids=["deny", "warn", "deny-excluded"],
+)
+def test_unmanaged_files_policy_in_audit(lifecycle_world, case, fields, fails, reported) -> None:
+    """unmanaged_files -- deny fails audit --ci on a file the lock does not record, warn
+    reports it, and exclude suppresses it."""
+    _unmanaged_policy(lifecycle_world, case, **fields)
+    _hand_written_file(lifecycle_world)
+    audit = driver.run(lifecycle_world, ["audit", "--ci"])
+    text = _text(audit)
+    assert (audit.returncode == 1) is fails, text
+    assert ("hand-written.instructions.md" in text) is reported, text
+    assert (lifecycle_world.project / _UNMANAGED).is_file()
+
+
+@pytest.mark.xfail(strict=True, reason="G7 policy promise: install-time deny (tracking pending)")
+def test_unmanaged_files_deny_blocks_an_install_that_would_leave_drift(lifecycle_world) -> None:
+    """unmanaged_files.action: deny -- "deny blocks installs that would leave drift"."""
+    _unmanaged_policy(lifecycle_world, "install-deny", action="deny")
+    _hand_written_file(lifecycle_world)
+    result = driver.run(lifecycle_world, ["install", lifecycle_world.packages["p-skill:git"].spec])
+    assert result.returncode == 1, _text(result)
+    assert "hand-written.instructions.md" in _text(result), _text(result)
+    assert (lifecycle_world.project / _UNMANAGED).is_file()
