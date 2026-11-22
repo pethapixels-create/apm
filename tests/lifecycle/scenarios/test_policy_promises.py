@@ -190,6 +190,9 @@ def test_trust_transitive_false_fails_audit_for_an_unlisted_transitive_server(
     _transitive_policy(lifecycle_world, path, trust_transitive=False)
     audit = driver.run(lifecycle_world, ["audit", "--ci"])
     assert audit.returncode == 1, _text(audit)
+    # The policy names the cause: a one-run flag install already fails audit on
+    # its own (the consumer trust check), so the server name alone proves nothing.
+    assert "trust_transitive" in _text(audit), _text(audit)
     assert name in _text(audit), _text(audit)
 
 
