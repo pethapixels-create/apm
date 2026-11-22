@@ -33,11 +33,7 @@ from tests.lifecycle.world.clone import clone
 from tests.lifecycle.world.scopes import use_policy
 from tests.lifecycle.world.services import ORG
 
-pytestmark = [
-    pytest.mark.e2e,
-    pytest.mark.integration,
-    pytest.mark.promise("P-INV-I2", "P-INV-I4"),
-]
+pytestmark = [pytest.mark.promise("P-INV-I2", "P-INV-I4")]
 
 _FAST_ENV = "APM_INSTALL_FAST_PATH"
 _HIT = "[i] install fast path: replayed a verified no-op"

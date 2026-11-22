@@ -42,6 +42,7 @@ import re
 import stat
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -301,8 +302,24 @@ def deployed_hashes_intact(project_root: Path) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _under(path: str, roots: tuple[str, ...]) -> bool:
+    return any(path == root or path.startswith(root + os.sep) for root in roots)
+
+
 class _Recorder:
-    def __init__(self, excluded_roots: tuple[str, ...]) -> None:
+    """Observed inputs of one run.
+
+    *excluded_roots* (interpreter, APM code, stamps, policy cache) are neither
+    inputs nor writes. A write under *scratch_roots* (the temp dir) is allowed
+    unless it is also under *protected_roots* (the project).
+    """
+
+    def __init__(
+        self,
+        excluded_roots: tuple[str, ...],
+        scratch_roots: tuple[str, ...] = (),
+        protected_roots: tuple[str, ...] = (),
+    ) -> None:
         self.reads: set[str] = set()
         self.listed: set[str] = set()
         self.probed: set[str] = set()
@@ -310,6 +327,8 @@ class _Recorder:
         self.env_all = False
         self.violations: list[str] = []
         self.excluded_roots = excluded_roots
+        self.scratch_roots = scratch_roots
+        self.protected_roots = protected_roots
 
     def _path(self, value: Any) -> str | None:
         if isinstance(value, int) or value is None:
@@ -321,11 +340,17 @@ class _Recorder:
         return os.path.abspath(text)
 
     def _excluded(self, path: str) -> bool:
-        return any(path == root or path.startswith(root + os.sep) for root in self.excluded_roots)
+        return _under(path, self.excluded_roots)
+
+    def _scratch(self, path: str) -> bool:
+        return _under(path, self.scratch_roots) and not _under(path, self.protected_roots)
 
     def violate(self, reason: str) -> None:
-        if len(self.violations) < 20:
-            self.violations.append(reason)
+        """One violation settles it: stop observing so the rest of the run pays nothing."""
+        global _ACTIVE
+        self.violations.append(reason)
+        if _ACTIVE is self:
+            _ACTIVE = None
 
     def on_event(self, event: str, args: tuple[Any, ...]) -> None:
         if event == "open":
@@ -338,7 +363,8 @@ class _Recorder:
                 isinstance(flags, int) and flags & _WRITE_FLAGS
             )
             if writes:
-                self.violate(f"write:{path}")
+                if not self._scratch(path):
+                    self.violate(f"write:{path}")
             else:
                 self.reads.add(path)
         elif event in ("os.listdir", "os.scandir"):
@@ -351,7 +377,7 @@ class _Recorder:
                 self.violate(f"subprocess:{argv!r}"[:200])
         elif event in _WRITE_EVENTS:
             path = self._path(args[0]) if args else None
-            if path is None or not self._excluded(path):
+            if path is None or not (self._excluded(path) or self._scratch(path)):
                 self.violate(f"{event}:{path}")
         elif event in _VIOLATION_EVENTS:
             self.violate(event)
@@ -446,21 +472,28 @@ class _Tee(io.TextIOBase):
 class _Recording:
     """Context of one recorded full run."""
 
-    def __init__(self, key: dict[str, Any], stamp: Path, policy: str | None, started: float):
+    def __init__(
+        self,
+        key: dict[str, Any],
+        stamp: Path,
+        policy: str | None,
+        started: float,
+        project_root: Path,
+    ) -> None:
         self.key = key
         self.stamp = stamp
         self.policy = policy
         self.started = started
         self.output: list[tuple[int, str]] = []
-        excluded = {
-            os.path.abspath(p)
-            for p in (sys.prefix, sys.base_prefix, sys.exec_prefix, tempfile.gettempdir())
-        }
+        excluded = {os.path.abspath(p) for p in (sys.prefix, sys.base_prefix, sys.exec_prefix)}
         excluded.add(str(Path(__file__).resolve().parents[1]))
         excluded.add(str(stamp.parent))
         excluded.update(_policy_cache_roots())
-        excluded.update(os.path.realpath(root) for root in list(excluded))
-        self.recorder = _Recorder(tuple(sorted(excluded)))
+        self.recorder = _Recorder(
+            _with_realpaths(excluded),
+            _with_realpaths({tempfile.gettempdir()}),
+            _with_realpaths({str(project_root)}),
+        )
         self._saved: dict[str, Any] = {}
 
     def __enter__(self) -> _Recording:
@@ -551,6 +584,12 @@ class _Recording:
         return True
 
 
+def _with_realpaths(roots: set[str]) -> tuple[str, ...]:
+    paths = {os.path.abspath(root) for root in roots}
+    paths.update(os.path.realpath(root) for root in list(paths))
+    return tuple(sorted(paths))
+
+
 def _policy_cache_roots() -> set[str]:
     """Policy caches are re-evaluated live on replay, so their bytes are not inputs."""
     try:
@@ -568,7 +607,10 @@ def _policy_cache_roots() -> set[str]:
 
 
 def _stamp_mismatch(
-    stamp: dict[str, Any], key: dict[str, Any], policy: str, project_root: Path
+    stamp: dict[str, Any],
+    key: dict[str, Any],
+    policy: Callable[[], str | None],
+    project_root: Path,
 ) -> str | None:
     """Return why *stamp* does not prove this run a no-op, or ``None`` when it does."""
     if stamp.get("key") != key:
@@ -586,11 +628,32 @@ def _stamp_mismatch(
     for path, entry in stamp.get("probed", {}).items():
         if _probe(path) != entry:
             return f"path {path}"
-    if policy != stamp.get("policy"):
+    current = policy()
+    if current is None or current != stamp.get("policy"):
         return "org policy"
     if not deployed_hashes_intact(project_root):
         return "deployed file hash"
     return None
+
+
+def _in_background(compute: Callable[[], str | None]) -> Callable[[], str | None]:
+    """Start *compute* on a thread (policy discovery waits on git); return its joiner."""
+    box: dict[str, Any] = {}
+
+    def target() -> None:
+        try:
+            box["value"] = compute()
+        except Exception:
+            box["value"] = None
+
+    thread = threading.Thread(target=target, name="apm-fast-path-policy", daemon=True)
+    thread.start()
+
+    def join() -> str | None:
+        thread.join()
+        return box.get("value")
+
+    return join
 
 
 def _replay(stamp: dict[str, Any], started: float) -> None:
@@ -625,14 +688,13 @@ def run_with_fast_path(
         stamp_path = _stamp_path(key)
     except Exception:
         return run()
+    if not (root / "apm.lock.yaml").is_file():
+        return run()  # a first install is never a no-op
     trace = os.environ.get(_DISABLE_ENV, "").strip().lower() == "trace"
-    try:
-        policy = policy_fingerprint(root)
-    except Exception:
-        policy = None
+    policy = _in_background(lambda: policy_fingerprint(root))
     stamp = _load(stamp_path)
-    reason = "no stamp" if stamp is None else "org policy not cacheable"
-    if stamp is not None and policy is not None:
+    reason = "no stamp"
+    if stamp is not None:
         try:
             reason = _stamp_mismatch(stamp, key, policy, root)
         except Exception as error:
@@ -644,7 +706,7 @@ def run_with_fast_path(
             return None
     if trace:
         sys.stderr.write(f"[i] install fast path: full run ({reason})\n")
-    recording = _Recording(key, stamp_path, policy, started)
+    recording = _Recording(key, stamp_path, policy(), started, root)
     with recording:
         result = run()
     saved = recording.save(root)
