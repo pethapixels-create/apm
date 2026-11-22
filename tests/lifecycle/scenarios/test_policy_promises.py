@@ -21,6 +21,7 @@ import yaml
 
 from tests.lifecycle import driver
 from tests.lifecycle.world import use_policy
+from tests.lifecycle.world.services import REGISTRY_SERVER
 from tests.utils.local_package import LocalPackageFactory
 
 pytestmark = [
@@ -58,21 +59,36 @@ def _skill(factory: LocalPackageFactory, package, name: str) -> None:
     )
 
 
-def _transitive_self_defined_server(world) -> tuple[str, Path]:
-    """t-parent -> t-child; t-child declares a self-defined stdio MCP server."""
+# A transitive MCP server reaches a project three ways: the one-run flag admits a
+# self-defined one, an approval pins it, or a plain registry server needs neither.
+PATHS = ("flag", "approved", "registry")
+_CONFIGURED_NAME = {"flag": _SERVER, "approved": _SERVER, "registry": "p-registry"}
+
+
+def _author(world, path: str) -> tuple[str, Path, str]:
+    """t-parent -> t-child; t-child declares the path's MCP server.
+
+    Returns the parent spec, the child root and the server name the policy names.
+    """
     factory = LocalPackageFactory(world.root / "g1")
-    server = {
-        "name": _SERVER,
-        "registry": False,
-        "transport": "stdio",
-        "command": "apm-lifecycle-inert-server",
-        "args": ["--stdio"],
-    }
+    if path == "registry":
+        server, name = REGISTRY_SERVER, REGISTRY_SERVER
+    else:
+        server = {
+            "name": _SERVER,
+            "registry": False,
+            "transport": "stdio",
+            "command": "apm-lifecycle-inert-server",
+            "args": ["--stdio"],
+        }
+        name = _SERVER
     child = factory.create("t-child", version="1.0.0", mcp_dependencies=[server])
     _skill(factory, child, "t-child")
     parent = factory.create("t-parent", version="1.0.0", dependencies=["../t-child"])
     _skill(factory, parent, "t-parent")
-    return str(parent.root), Path(child.root).resolve()
+    if path != "approved":
+        _gate_off(world)
+    return str(parent.root), Path(child.root).resolve(), name
 
 
 def _gate_off(world) -> None:
@@ -83,8 +99,12 @@ def _gate_off(world) -> None:
     manifest.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
 
-def _approved_install(world, parent: str, child: Path):
-    """Install (the server parks), approve the transitive package, install again."""
+def _install(world, path: str, parent: str, child: Path):
+    """Reach the transitive server the path's way; return the deciding install."""
+    if path == "flag":
+        return driver.run(world, ["install", parent, "--trust-transitive-mcp"])
+    if path == "registry":
+        return driver.run(world, ["install", parent])
     first = driver.run(world, ["install", parent])
     assert first.returncode == 0, _text(first)
     approve = driver.run(world, ["approve", f"local:{child}"])
@@ -92,15 +112,20 @@ def _approved_install(world, parent: str, child: Path):
     return driver.run(world, ["install"])
 
 
-def _no_transitive_trust(world) -> None:
+# An unrelated deny entry keeps the policy non-empty: a policy that only restates
+# defaults is reported "present but empty" and is not enforced at all.
+_UNRELATED_DENY = "io.github.unrelated/never-requested"
+
+
+def _transitive_policy(world, path: str, **mcp) -> None:
     _serve_policy(
         world,
-        "policy-g1-no-transitive-trust",
+        f"policy-g1-{path}",
         {
             "name": "g1",
             "version": "1.0",
             "enforcement": "block",
-            "mcp": {"trust_transitive": False},
+            "mcp": {"deny": [_UNRELATED_DENY], **mcp},
         },
     )
 
@@ -120,49 +145,52 @@ def _text(result) -> str:
 # -- G1: mcp.trust_transitive (policy-schema.md, mcp section) ----------------------
 
 
-def test_trust_transitive_control_the_flag_admits_a_transitive_server(lifecycle_world) -> None:
-    """Control: with no opinion on transitive trust, the one-run flag deploys the server."""
-    use_policy(lifecycle_world, "allow")
-    _gate_off(lifecycle_world)
-    parent, _child = _transitive_self_defined_server(lifecycle_world)
-    result = driver.run(lifecycle_world, ["install", parent, "--trust-transitive-mcp"])
+@pytest.mark.parametrize("path", PATHS)
+def test_transitive_mcp_without_org_policy_is_admitted(lifecycle_world, path) -> None:
+    """Control: a project with no org policy reaches the server as before."""
+    parent, child, _name = _author(lifecycle_world, path)
+    result = _install(lifecycle_world, path, parent, child)
     assert result.returncode == 0, _text(result)
-    assert _configured(lifecycle_world, _SERVER), _text(result)
+    assert _configured(lifecycle_world, _CONFIGURED_NAME[path]), _text(result)
+
+
+@pytest.mark.parametrize("path", PATHS)
+def test_transitive_mcp_on_the_allow_list_is_admitted(lifecycle_world, path) -> None:
+    """Control: trust_transitive false still admits a server mcp.allow names."""
+    parent, child, name = _author(lifecycle_world, path)
+    _transitive_policy(lifecycle_world, path, trust_transitive=False, allow=[name])
+    result = _install(lifecycle_world, path, parent, child)
+    assert result.returncode == 0, _text(result)
+    assert _configured(lifecycle_world, _CONFIGURED_NAME[path]), _text(result)
 
 
 @pytest.mark.xfail(strict=True, reason=f"G1 policy promise: {_PRIVATE}")
-def test_trust_transitive_false_refuses_the_one_run_flag(lifecycle_world) -> None:
-    """mcp.trust_transitive: false -- the one-run flag does not admit a transitive server."""
-    _no_transitive_trust(lifecycle_world)
-    _gate_off(lifecycle_world)
-    parent, _child = _transitive_self_defined_server(lifecycle_world)
-    result = driver.run(lifecycle_world, ["install", parent, "--trust-transitive-mcp"])
+@pytest.mark.parametrize("path", PATHS)
+def test_trust_transitive_false_refuses_an_unlisted_transitive_server(
+    lifecycle_world, path
+) -> None:
+    """mcp.trust_transitive false: install refuses a transitive server mcp.allow does not name."""
+    parent, child, _name = _author(lifecycle_world, path)
+    _transitive_policy(lifecycle_world, path, trust_transitive=False)
+    result = _install(lifecycle_world, path, parent, child)
     assert result.returncode == 1, _text(result)
     assert "trust_transitive" in _text(result), _text(result)
-    assert not _configured(lifecycle_world, _SERVER), _text(result)
-
-
-def test_trust_transitive_control_an_approval_admits_a_transitive_server(lifecycle_world) -> None:
-    """Control: with no opinion on transitive trust, an approval deploys the server."""
-    use_policy(lifecycle_world, "allow")
-    parent, child = _transitive_self_defined_server(lifecycle_world)
-    result = _approved_install(lifecycle_world, parent, child)
-    assert result.returncode == 0, _text(result)
-    assert _configured(lifecycle_world, _SERVER), _text(result)
+    assert not _configured(lifecycle_world, _CONFIGURED_NAME[path]), _text(result)
 
 
 @pytest.mark.xfail(strict=True, reason=f"G1 policy promise: {_PRIVATE}")
-def test_trust_transitive_false_refuses_an_approved_transitive_server(lifecycle_world) -> None:
-    """mcp.trust_transitive: false -- an approval alone does not admit a transitive server."""
-    _no_transitive_trust(lifecycle_world)
-    parent, child = _transitive_self_defined_server(lifecycle_world)
-    result = _approved_install(lifecycle_world, parent, child)
-    assert result.returncode == 1, _text(result)
-    assert "trust_transitive" in _text(result), _text(result)
-    assert not _configured(lifecycle_world, _SERVER), _text(result)
+@pytest.mark.parametrize("path", PATHS)
+def test_trust_transitive_false_fails_audit_for_an_unlisted_transitive_server(
+    lifecycle_world, path
+) -> None:
+    """A server installed before the policy applied fails ``audit --ci`` once it does."""
+    parent, child, name = _author(lifecycle_world, path)
+    installed = _install(lifecycle_world, path, parent, child)
+    assert installed.returncode == 0, _text(installed)
+    _transitive_policy(lifecycle_world, path, trust_transitive=False)
     audit = driver.run(lifecycle_world, ["audit", "--ci"])
     assert audit.returncode == 1, _text(audit)
-    assert _SERVER in _text(audit), _text(audit)
+    assert name in _text(audit), _text(audit)
 
 
 # -- G2: manifest.content_types (policy-schema.md, manifest section) ---------------
