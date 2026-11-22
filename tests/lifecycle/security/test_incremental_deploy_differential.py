@@ -30,6 +30,7 @@ import pytest
 import yaml
 
 from tests.lifecycle import driver
+from tests.lifecycle.known import KnownFailure
 from tests.lifecycle.world import World
 from tests.lifecycle.world.clone import clone
 from tests.lifecycle.world.scopes import use_policy
@@ -260,7 +261,28 @@ def _diff(left: dict, right: dict, worlds: tuple[World, World]) -> list[str]:
     return lines
 
 
-@pytest.mark.parametrize("change", sorted(CHANGES))
+# Retiring the last APM entry leaves the APM-created config file as an empty
+# skeleton (and an empty mcp_target_servers lock field); a fresh deploy has neither.
+_EMPTY_CONFIG_LEFT = KnownFailure(
+    "#4852",
+    "retiring the last APM entry leaves an empty APM-created config file",
+    r"(\.mcp\.json|\.claude/settings\.json): incremental=.*fresh='<absent>'",
+)
+_KNOWN = {
+    "approval-revoked": _EMPTY_CONFIG_LEFT,
+    "policy-denies-executables": _EMPTY_CONFIG_LEFT,
+    "target-removed": _EMPTY_CONFIG_LEFT,
+}
+
+
+def _cases() -> list:
+    return [
+        pytest.param(name, marks=_KNOWN[name].mark()) if name in _KNOWN else name
+        for name in sorted(CHANGES)
+    ]
+
+
+@pytest.mark.parametrize("change", _cases())
 def test_install_after_a_change_equals_a_fresh_deploy(
     lifecycle_template: World, tmp_path: Path, change: str
 ) -> None:
