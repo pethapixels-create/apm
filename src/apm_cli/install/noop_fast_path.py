@@ -380,6 +380,8 @@ class _Recorder:
             text = os.fsdecode(os.fspath(value))
         except TypeError:
             return None
+        if text.startswith("/") and "/." not in text and "//" not in text:
+            return text.rstrip("/") or "/"  # already absolute and normal: skip normpath
         return os.path.abspath(text)
 
     def _excluded(self, path: str) -> bool:
@@ -426,6 +428,8 @@ class _Recorder:
             isinstance(flags, int) and flags & _WRITE_FLAGS
         )
         if writes:
+            if path == os.devnull or path.startswith("/dev/fd/"):
+                return  # discarding output is not a write
             if not self._scratch(path):
                 self.violate(f"write:{path}")
         elif self._scratch(path):

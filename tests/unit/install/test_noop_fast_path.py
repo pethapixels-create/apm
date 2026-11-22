@@ -220,3 +220,17 @@ def test_only_a_clean_command_exit_records(project, code, replayed) -> None:
         except Exit as error:
             assert error.exit_code == code
     assert run.calls == (1 if replayed else 2)
+
+
+@_POSIX_ONLY
+def test_discarding_output_to_devnull_is_not_a_write(project) -> None:
+    class _QuietInstall(_Install):
+        def __call__(self) -> None:
+            with open(os.devnull, "w", encoding="utf-8") as sink:
+                sink.write("discarded")
+            super().__call__()
+
+    run = _QuietInstall(project)
+    _install(run)
+    _install(run)
+    assert run.calls == 1
