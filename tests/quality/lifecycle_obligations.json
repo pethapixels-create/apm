@@ -6760,15 +6760,11 @@
    "witness": "tests/lifecycle/machines/test_m_source.py::test_source_spine_covers_every_form_and_op"
   },
   "T3|OP=approve-deny|SRC=local-bundle|PRIM=lsp": {
-   "credited_by": [
-    "T3|approve-deny|bundle|lsp"
-   ],
    "family": "T3",
    "issue": "#4096",
    "lane": "T-2",
-   "status": "required",
-   "strength": "e2e",
-   "witness": "tests/lifecycle/machines/test_m_source.py::test_source_spine_covers_every_form_and_op"
+   "status": "baseline",
+   "strength": "e2e"
   },
   "T3|OP=approve-deny|SRC=local-bundle|PRIM=mcp": {
    "credited_by": [
@@ -14584,7 +14580,6 @@
    "credited_by": [
     "T3|approve-deny|bundle|bin",
     "T3|approve-deny|bundle|hook",
-    "T3|approve-deny|bundle|lsp",
     "T3|approve-deny|bundle|mcp",
     "T5|real|approve-deny|bundle"
    ],
@@ -22444,7 +22439,6 @@
   },
   "pair|SRC=local-bundle|PRIM=lsp": {
    "credited_by": [
-    "T3|approve-deny|bundle|lsp",
     "T3|audit|bundle|lsp",
     "T3|install|bundle|lsp"
    ],
