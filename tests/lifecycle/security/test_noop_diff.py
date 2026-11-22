@@ -128,9 +128,12 @@ def _run(world: World, argv: tuple[str, ...], *, fast: str | None):
 
 
 def _converge(world: World, *, fast: bool) -> None:
-    """Install, then one no-op: the fast world's first repeat must exit early."""
+    """Apply the approval, then one no-op: the fast world's first repeat must exit early."""
+    applied = _run(world, ("install",), fast="0")
+    assert applied.returncode == 0, applied.stdout + applied.stderr
     result = _run(world, ("install",), fast="trace" if fast else "0")
     assert result.returncode == 0, result.stdout + result.stderr
+    assert "No changes -- install state already up to date" in result.stdout, result.stdout
     if fast:
         assert _HIT in result.stderr, (
             "the first repeat of a converged install must exit early:\n"
