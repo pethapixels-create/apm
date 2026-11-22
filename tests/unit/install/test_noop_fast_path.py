@@ -57,15 +57,17 @@ def _install(run: _Install) -> None:
     fp.run_with_fast_path({}, run, project_root=run.root)
 
 
-def test_a_recorded_noop_is_replayed_without_running(project, capsys) -> None:
+def test_a_recorded_noop_is_replayed_without_running(project, capsys, monkeypatch) -> None:
+    monkeypatch.setenv("APM_INSTALL_FAST_PATH", "trace")
     run = _Install(project)
     _install(run)
     _install(run)
-    out = capsys.readouterr().out
-    assert run.calls == 1
+    out, err = capsys.readouterr()
+    assert run.calls == 1, err
+    assert "[i] install fast path: replayed a verified no-op" in err, err
     assert out.count("[*] Installing") == 2
     assert out.count("No changes -- install state already up to date in ") == 2
-    assert "1.2s" in out.splitlines()[1]
+    assert "1.2s" not in out.splitlines()[-1], "the replay renders its own elapsed time"
 
 
 @pytest.mark.parametrize(

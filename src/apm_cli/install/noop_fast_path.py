@@ -325,6 +325,7 @@ class _Recorder:
         self.reads: set[str] = set()
         self.listed: set[str] = set()
         self.probed: set[str] = set()
+        self.resolved: set[str] = set()
         self.env: set[str] = set()
         self.env_all = False
         self.violations: list[str] = []
@@ -395,6 +396,11 @@ class _Recorder:
         if path is not None and not self._excluded(path):
             self.probed.add(path)
 
+    def on_resolve(self, value: Any, strict: bool) -> None:
+        path = self._path(value)
+        if path is not None and not self._excluded(path):
+            self.resolved.add(f"{int(bool(strict))}|{path}")
+
 
 def _allowed_subprocess(argv: Any) -> bool:
     if not isinstance(argv, (list, tuple)) or len(argv) < 2:
@@ -424,6 +430,27 @@ def _probing(original: Callable[..., Any]) -> Callable[..., Any]:
         return original(path, *args, **kwargs)
 
     return probe
+
+
+def _resolving(original: Callable[..., Any]) -> Callable[..., Any]:
+    """Record ``os.path.realpath`` answers: its internal lstat calls may be unobservable."""
+
+    @functools.wraps(original)
+    def resolve(path: Any, *args: Any, **kwargs: Any) -> Any:
+        recorder = _ACTIVE
+        if recorder is not None:
+            recorder.on_resolve(path, bool(kwargs.get("strict", args[0] if args else False)))
+        return original(path, *args, **kwargs)
+
+    return resolve
+
+
+def _resolution(key: str) -> str:
+    strict, _, path = key.partition("|")
+    try:
+        return os.path.realpath(path, strict=strict == "1")
+    except OSError as error:
+        return f"error:{error.errno}"
 
 
 class _RecordingEnviron(os._Environ):  # type: ignore[name-defined,misc]
@@ -516,6 +543,7 @@ class _Recording:
             "stat": os.stat,
             "lstat": os.lstat,
             "readlink": os.readlink,
+            "realpath": os.path.realpath,
             "environ_class": os.environ.__class__,
             "stdout": sys.stdout,
             "stderr": sys.stderr,
@@ -523,6 +551,7 @@ class _Recording:
         os.stat = _probing(os.stat)
         os.lstat = _probing(os.lstat)
         os.readlink = _probing(os.readlink)
+        os.path.realpath = _resolving(os.path.realpath)
         os.environ.__class__ = _RecordingEnviron
         sys.stdout = _Tee(sys.stdout, self.output, 1)
         sys.stderr = _Tee(sys.stderr, self.output, 2)
@@ -543,16 +572,24 @@ class _Recording:
             lambda p: Path(p).is_file(),
             lambda p: Path(p).resolve(),
         ):
-            self.recorder.probed.discard(canary)
+            self._forget(canary)
             probe(canary)
-            seen.append(canary in self.recorder.probed)
-        self.recorder.probed.discard(canary)
+            seen.append(
+                canary in self.recorder.probed
+                or any(key.endswith("|" + canary) for key in self.recorder.resolved)
+            )
+        self._forget(canary)
         if not all(seen):
             self.recorder.violate("instrumentation-gap")
+
+    def _forget(self, path: str) -> None:
+        self.recorder.probed.discard(path)
+        self.recorder.resolved.difference_update({f"0|{path}", f"1|{path}"})
 
     def __exit__(self, *exc: object) -> None:
         global _ACTIVE
         _ACTIVE = None
+        os.path.realpath = self._saved["realpath"]
         os.stat = self._saved["stat"]
         os.lstat = self._saved["lstat"]
         os.readlink = self._saved["readlink"]
@@ -582,6 +619,7 @@ class _Recording:
             "reads": {path: _file_digest(path) for path in sorted(recorder.reads)},
             "listed": {path: _listing(path) for path in sorted(recorder.listed)},
             "probed": {path: _probe(path) for path in sorted(recorder.probed)},
+            "resolved": {key: _resolution(key) for key in sorted(recorder.resolved)},
             "output": output,
         }
         try:
@@ -628,33 +666,38 @@ def _policy_cache_roots() -> set[str]:
 # ---------------------------------------------------------------------------
 
 
+def _first_changed(recorded: dict[str, Any], current: Callable[[str], Any]) -> str | None:
+    for path, value in recorded.items():
+        if current(path) != value:
+            return path
+    return None
+
+
 def _stamp_mismatch(
     stamp: dict[str, Any],
     key: dict[str, Any],
     policy: Callable[[], str | None],
     project_root: Path,
 ) -> str | None:
-    """Return why *stamp* does not prove this run a no-op, or ``None`` when it does."""
-    if stamp.get("key") != key:
-        return "invocation"
-    if stamp.get("code") != _code_identity():
-        return "apm version"
-    if stamp.get("env") != _env_digest(stamp.get("env_names")):
-        return "environment"
-    for path, digest in stamp.get("reads", {}).items():
-        if _file_digest(path) != digest:
-            return f"content {path}"
-    for path, entries in stamp.get("listed", {}).items():
-        if _listing(path) != entries:
-            return f"listing {path}"
-    for path, entry in stamp.get("probed", {}).items():
-        if _probe(path) != entry:
-            return f"path {path}"
-    current = policy()
-    if current is None or current != stamp.get("policy"):
-        return "org policy"
-    if not deployed_hashes_intact(project_root):
-        return "deployed file hash"
+    """Return why *stamp* does not prove this run a no-op, or ``None`` when it does.
+
+    Checks run cheapest first; each is a callable so the first failure stops.
+    """
+    checks: list[tuple[str, Callable[[], object]]] = [
+        ("invocation", lambda: stamp.get("key") != key),
+        ("apm version", lambda: stamp.get("code") != _code_identity()),
+        ("environment", lambda: stamp.get("env") != _env_digest(stamp.get("env_names"))),
+        ("content", lambda: _first_changed(stamp.get("reads", {}), _file_digest)),
+        ("listing", lambda: _first_changed(stamp.get("listed", {}), _listing)),
+        ("path", lambda: _first_changed(stamp.get("probed", {}), _probe)),
+        ("resolution", lambda: _first_changed(stamp.get("resolved", {}), _resolution)),
+        ("org policy", lambda: (lambda now: now is None or now != stamp.get("policy"))(policy())),
+        ("deployed file hash", lambda: not deployed_hashes_intact(project_root)),
+    ]
+    for reason, changed in checks:
+        found = changed()
+        if found:
+            return reason if found is True else f"{reason} {found}"
     return None
 
 
