@@ -391,6 +391,8 @@ class _Recorder:
         self.env: set[str] = set()
         self.env_all = False
         self.violations: list[str] = []
+        # Trace mode keeps observing after the first violation to list them all.
+        self.diagnose = os.environ.get(_DISABLE_ENV, "").strip().lower() == "trace"
         self.excluded_roots = excluded_roots
         self.scratch_roots = scratch_roots
         self.protected_roots = protected_roots
@@ -434,8 +436,9 @@ class _Recorder:
     def violate(self, reason: str) -> None:
         """One violation settles it: stop observing so the rest of the run pays nothing."""
         global _ACTIVE
-        self.violations.append(reason)
-        if _ACTIVE is self:
+        if len(self.violations) < 50:
+            self.violations.append(reason)
+        if _ACTIVE is self and not self.diagnose:
             _ACTIVE = None
 
     def on_event(self, event: str, args: tuple[Any, ...]) -> None:
@@ -448,11 +451,11 @@ class _Recorder:
                 self._observe(path)
         elif event == "subprocess.Popen":
             argv = args[1] if len(args) > 1 else None
-            if not _allowed_subprocess(argv):
+            if not (_allowed_subprocess(argv) or _within_policy_discovery()):
                 self.violate(f"subprocess:{argv!r}"[:200])
         elif event in _WRITE_EVENTS:
             self._on_write(event, args)
-        elif event in _VIOLATION_EVENTS:
+        elif event in _VIOLATION_EVENTS and not _within_policy_discovery():
             self.violate(event)
 
     def _on_open(self, args: tuple[Any, ...]) -> None:
@@ -526,6 +529,22 @@ def _is_noop_write(event: str, args: tuple[Any, ...]) -> bool:
         return stat.S_ISDIR(info.st_mode)
     if event == "os.chmod" and len(args) > 1 and isinstance(args[1], int):
         return stat.S_IMODE(info.st_mode) == stat.S_IMODE(args[1])
+    return False
+
+
+_POLICY_DISCOVERY_FRAME = ("discover_policy_with_chain", os.path.join("policy", "discovery.py"))
+
+
+def _within_policy_discovery() -> bool:
+    """True while org policy discovery runs: its network, credential lookups and git
+    reads are re-evaluated live on every replay, so they are not recorded inputs."""
+    frame = sys._getframe(2)
+    name, filename = _POLICY_DISCOVERY_FRAME
+    while frame is not None:
+        code = frame.f_code
+        if code.co_name == name and code.co_filename.endswith(filename):
+            return True
+        frame = frame.f_back
     return False
 
 
@@ -973,7 +992,7 @@ def _finish(recording: _Recording, root: Path, trace: bool) -> None:
         recording.recorder.violations.append(f"save failed: {type(error).__name__}")
         saved = False
     if trace:
-        detail = "recorded" if saved else f"not recorded {recording.recorder.violations[:3]}"
+        detail = "recorded" if saved else f"not recorded {recording.recorder.violations[:8]}"
         sys.stderr.write(f"[i] install fast path: {detail}\n")
 
 
