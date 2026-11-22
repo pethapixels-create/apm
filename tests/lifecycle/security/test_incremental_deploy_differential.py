@@ -49,6 +49,8 @@ _KIT_SPEC = f"../../authored/{_KIT}"
 _SKILL = "---\nname: {name}\ndescription: Lifecycle kit skill.\n---\n\n{body}\n"
 _RULE = '---\napplyTo: "**"\n---\n\n{body}\n'
 _SKILL_PATH = ".agents/skills/c-alpha/SKILL.md"
+# kept_edit_message (integration/base_integrator.py): the entry, then why it was kept.
+_KEPT = re.compile(r"c-alpha.*(modified since APM deployed it|may hold local edits)")
 
 
 @dataclass(frozen=True)
@@ -133,7 +135,7 @@ def _apply_inputs(world: World, start: Inputs, end: Inputs) -> None:
         _revoke_user_approval(world)
 
 
-# -- out-of-band changes (no input edit; the fresh twin is the plain converged state) ---
+# -- out-of-band changes: no input edit; the fresh twin gets the same on-disk state ------
 
 
 def _delete_deployed(world: World) -> tuple[str, ...]:
@@ -148,13 +150,28 @@ def _edit_deployed(world: World) -> tuple[str, ...]:
 
 
 def _symlink_destination(world: World) -> tuple[str, ...]:
+    """The skill's destination directory becomes a link to a tree outside the project."""
     outside = world.root / "outside-skill"
     outside.mkdir()
     (outside / "SKILL.md").write_text("not APM's file\n", encoding="ascii")
     deployed = world.project / _SKILL_PATH
-    shutil.rmtree(deployed.parent)
+    if deployed.parent.exists():
+        shutil.rmtree(deployed.parent)
+    deployed.parent.parent.mkdir(parents=True, exist_ok=True)
     deployed.parent.symlink_to(outside, target_is_directory=True)
     return (str(Path(_SKILL_PATH).parent.as_posix()),)
+
+
+def _same_user_file(incremental: World, fresh: World) -> None:
+    """The fresh twin holds the same user-written bytes at the managed path."""
+    target = fresh.project / _SKILL_PATH
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes((incremental.project / _SKILL_PATH).read_bytes())
+
+
+def _same_symlink(incremental: World, fresh: World) -> None:
+    del incremental
+    _symlink_destination(fresh)
 
 
 @dataclass(frozen=True)
@@ -162,6 +179,8 @@ class Change:
     start: Inputs
     end: Inputs
     out_of_band: Callable[[World], tuple[str, ...]] | None = None
+    # Puts the same user-made on-disk state into the fresh twin before its install.
+    pre_place: Callable[[World, World], None] | None = None
 
 
 CHANGES: dict[str, Change] = {
@@ -173,8 +192,8 @@ CHANGES: dict[str, Change] = {
     "policy-denies-executables": Change(_BASE, replace(_BASE, policy="exec-deny-all")),
     "approval-revoked": Change(_BASE, replace(_BASE, approved=False)),
     "locked-file-missing": Change(_BASE, _BASE, _delete_deployed),
-    "user-edited-deployed-file": Change(_BASE, _BASE, _edit_deployed),
-    "symlinked-destination": Change(_BASE, _BASE, _symlink_destination),
+    "user-edited-deployed-file": Change(_BASE, _BASE, _edit_deployed, _same_user_file),
+    "symlinked-destination": Change(_BASE, _BASE, _symlink_destination, _same_symlink),
 }
 
 # Caches (git objects, policy) are not deployed state.
@@ -311,20 +330,30 @@ def test_install_after_a_change_equals_a_fresh_deploy(
     if config.is_file():
         text = config.read_text(encoding="utf-8").replace(str(incremental.root), str(fresh.root))
         (fresh.apm_home / "config.json").write_text(text, encoding="utf-8")
+    if spec.pre_place is not None:
+        spec.pre_place(incremental, fresh)
     reference = _install(fresh)
 
-    assert reference.returncode == 0, reference.stdout + reference.stderr
-    evidence = f"\n--- incremental install\n{after.stdout}{after.stderr}"
+    evidence = (
+        f"\n--- incremental install\n{after.stdout}{after.stderr}"
+        f"\n--- fresh install\n{reference.stdout}{reference.stderr}"
+    )
+    # Both twins reach the same outcome: success, or the same refusal.
+    assert after.returncode == reference.returncode, evidence
     if change == "symlinked-destination":
-        assert _digest(incremental.root / "outside-skill", (), incremental) == outside, (
-            "install wrote through a symlinked destination" + evidence
-        )
+        for world in (incremental, fresh):
+            assert _digest(world.root / "outside-skill", (), world) == outside, (
+                "install wrote through a symlinked destination" + evidence
+            )
     else:
         assert after.returncode == 0, evidence
     if user_bytes is not None:
-        assert (incremental.project / _SKILL_PATH).read_bytes() == user_bytes, (
-            "install overwrote the user's edit of a deployed file" + evidence
-        )
+        for world, result in ((incremental, after), (fresh, reference)):
+            assert (world.project / _SKILL_PATH).read_bytes() == user_bytes, (
+                "install overwrote the user's file at a managed path" + evidence
+            )
+            said = " ".join(f"{result.stdout} {result.stderr}".split())
+            assert _KEPT.search(said), "install kept the user's file without saying so" + evidence
     problems = _diff(
         _comparable(incremental, exempt), _comparable(fresh, exempt), (incremental, fresh)
     )
