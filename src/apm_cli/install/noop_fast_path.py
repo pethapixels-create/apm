@@ -132,25 +132,39 @@ def eligible(options: dict[str, Any]) -> bool:
         return False
     if options.get("update") or options.get("refresh") or options.get("dry_run"):
         return False
+    if options.get("no_policy") or _explicit_policy_in(sys.argv[1:]):
+        # --no-policy must not trigger discovery; an explicit --policy source composes
+        # with discovery in ways the org fingerprint does not capture.
+        return False
     return not options.get("root") and not options.get("global_")
+
+
+def _explicit_policy_in(argv: list[str]) -> bool:
+    return any(arg == "--policy" or arg.startswith("--policy=") for arg in argv)
 
 
 def _code_identity() -> dict[str, Any]:
     from apm_cli import __version__
 
     package_dir = Path(__file__).resolve().parents[1]
-    newest = 0
-    if not getattr(sys, "frozen", False):
-        for dirpath, _dirnames, filenames in os.walk(package_dir):
-            for name in filenames:
-                if name.endswith(".py"):
-                    newest = max(newest, os.stat(os.path.join(dirpath, name)).st_mtime_ns)
+    hasher = hashlib.sha256()
+    if getattr(sys, "frozen", False):
+        with open(sys.executable, "rb") as handle:
+            hasher.update(hashlib.file_digest(handle, "sha256").digest())
     else:
-        newest = os.stat(sys.executable).st_mtime_ns
+        for dirpath, dirnames, filenames in os.walk(package_dir):
+            dirnames.sort()
+            for name in sorted(filenames):
+                if name.endswith(".py"):
+                    path = os.path.join(dirpath, name)
+                    hasher.update(os.path.relpath(path, package_dir).encode() + b"\x00")
+                    with open(path, "rb") as handle:
+                        hasher.update(handle.read())
+                    hasher.update(b"\x00")
     return {
         "version": __version__,
         "package": str(package_dir),
-        "newest_source_ns": newest,
+        "code_sha256": hasher.hexdigest(),
         "python": sys.version,
         "executable": sys.executable,
     }
@@ -240,8 +254,8 @@ def _listing(path: str) -> list[Any] | None:
     return rows
 
 
-def _env_digest(names: list[str] | None) -> str:
-    environ = dict(os.environ)
+def _env_digest(names: list[str] | None, environ: dict[str, str] | None = None) -> str:
+    environ = dict(os.environ) if environ is None else environ
     selected = sorted(environ) if names is None else sorted(set(names))
     hasher = hashlib.sha256()
     for name in selected:
@@ -269,6 +283,8 @@ def policy_fingerprint(project_root: Path) -> str | None:
     except Exception:
         return None
     if result.cache_stale or result.fetch_error or result.error or result.warnings:
+        return None
+    if getattr(result, "unavailable_sources", None):
         return None
     if result.outcome not in {"found", "absent", "no_git_remote", "empty", "disabled"}:
         return None
@@ -306,12 +322,29 @@ def _under(path: str, roots: tuple[str, ...]) -> bool:
     return any(path == root or path.startswith(root + os.sep) for root in roots)
 
 
+_os_stat = os.stat
+_os_lstat = os.lstat
+_os_realpath = os.path.realpath
+
+
+def _snapshot(path: str) -> tuple[int, ...] | None:
+    """Identity of *path* when first observed; any later change refuses the stamp."""
+    try:
+        info = _os_lstat(path)
+    except OSError:
+        return None
+    return (info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_ino)
+
+
 class _Recorder:
     """Observed inputs of one run.
 
     *excluded_roots* (interpreter, APM code, stamps, policy cache) are neither
     inputs nor writes. A write under *scratch_roots* (the temp dir) is allowed
-    unless it is also under *protected_roots* (the project).
+    unless it is also under *protected_roots* (the project). Each input is
+    snapshotted when first observed so a change before the stamp is written
+    (a concurrent edit) refuses the stamp instead of pairing new bytes with
+    old output.
     """
 
     def __init__(
@@ -325,7 +358,8 @@ class _Recorder:
         self.reads: set[str] = set()
         self.listed: set[str] = set()
         self.probed: set[str] = set()
-        self.resolved: set[str] = set()
+        self.resolved: dict[str, str] = {}
+        self.observed: dict[str, tuple[int, ...] | None] = {}
         self.env: set[str] = set()
         self.env_all = False
         self.violations: list[str] = []
@@ -352,6 +386,10 @@ class _Recorder:
     def _scratch(self, path: str) -> bool:
         return _under(path, self.scratch_roots) and not _under(path, self.protected_roots)
 
+    def _observe(self, path: str) -> None:
+        if path not in self.observed:
+            self.observed[path] = _snapshot(path)
+
     def violate(self, reason: str) -> None:
         """One violation settles it: stop observing so the rest of the run pays nothing."""
         global _ACTIVE
@@ -361,45 +399,84 @@ class _Recorder:
 
     def on_event(self, event: str, args: tuple[Any, ...]) -> None:
         if event == "open":
-            path = self._path(args[0])
-            if path is None or self._excluded(path):
-                return
-            mode = args[1] if len(args) > 1 else None
-            flags = args[2] if len(args) > 2 else 0
-            writes = (isinstance(mode, str) and any(c in mode for c in "wax+")) or bool(
-                isinstance(flags, int) and flags & _WRITE_FLAGS
-            )
-            if writes:
-                if not self._scratch(path):
-                    self.violate(f"write:{path}")
-            elif _under(path, self.expiring_roots) and not _under(path, self.immutable_roots):
-                self.violate(f"expiring-cache:{path}")
-            else:
-                self.reads.add(path)
+            self._on_open(args)
         elif event in ("os.listdir", "os.scandir"):
-            path = self._path(args[0] if args else ".") if args else os.getcwd()
-            if path is not None and not self._excluded(path):
+            path = self._path(args[0]) if args else os.getcwd()
+            if path is not None and not (self._excluded(path) or self._scratch(path)):
                 self.listed.add(path)
+                self._observe(path)
         elif event == "subprocess.Popen":
             argv = args[1] if len(args) > 1 else None
             if not _allowed_subprocess(argv):
                 self.violate(f"subprocess:{argv!r}"[:200])
         elif event in _WRITE_EVENTS:
-            path = self._path(args[0]) if args else None
-            if path is None or not (self._excluded(path) or self._scratch(path)):
-                self.violate(f"{event}:{path}")
+            self._on_write(event, args)
         elif event in _VIOLATION_EVENTS:
             self.violate(event)
 
+    def _on_open(self, args: tuple[Any, ...]) -> None:
+        path = self._path(args[0])
+        if path is None or self._excluded(path):
+            return
+        mode = args[1] if len(args) > 1 else None
+        flags = args[2] if len(args) > 2 else 0
+        writes = (isinstance(mode, str) and any(c in mode for c in "wax+")) or bool(
+            isinstance(flags, int) and flags & _WRITE_FLAGS
+        )
+        if writes:
+            if not self._scratch(path):
+                self.violate(f"write:{path}")
+        elif self._scratch(path):
+            return  # the run's own temporary files are outputs, not inputs
+        elif _under(path, self.expiring_roots) and not _under(path, self.immutable_roots):
+            self.violate(f"expiring-cache:{path}")
+        else:
+            self.reads.add(path)
+            self._observe(path)
+
+    def _on_write(self, event: str, args: tuple[Any, ...]) -> None:
+        """Every path a mutating event names must be scratch, excluded, or a no-op."""
+        if _is_noop_write(event, args):
+            return
+        named = [arg for arg in args if isinstance(arg, (str, bytes, os.PathLike))]
+        if any(isinstance(arg, int) and not isinstance(arg, bool) for arg in args[1:]):
+            if event not in ("os.chmod", "os.chown", "os.utime", "os.mkdir"):
+                self.violate(f"{event}:dir_fd")
+                return
+        if not named:
+            self.violate(f"{event}:unattributed")
+            return
+        for arg in named:
+            path = self._path(arg)
+            if path is None or not (self._excluded(path) or self._scratch(path)):
+                self.violate(f"{event}:{path}")
+                return
+
     def on_probe(self, value: Any) -> None:
         path = self._path(value)
-        if path is not None and not self._excluded(path):
+        if path is not None and not (self._excluded(path) or self._scratch(path)):
             self.probed.add(path)
+            self._observe(path)
 
-    def on_resolve(self, value: Any, strict: bool) -> None:
+    def on_resolve(self, value: Any, strict: bool, result: Any) -> None:
         path = self._path(value)
         if path is not None and not self._excluded(path):
-            self.resolved.add(f"{int(bool(strict))}|{path}")
+            self.resolved.setdefault(f"{int(bool(strict))}|{path}", os.fsdecode(result))
+
+
+def _is_noop_write(event: str, args: tuple[Any, ...]) -> bool:
+    """``mkdir(exist_ok=True)`` on an existing directory and a same-mode chmod change nothing."""
+    if not args or not isinstance(args[0], (str, bytes, os.PathLike)):
+        return False
+    try:
+        info = _os_stat(args[0])
+    except OSError:
+        return False
+    if event == "os.mkdir":
+        return stat.S_ISDIR(info.st_mode)
+    if event == "os.chmod" and len(args) > 1 and isinstance(args[1], int):
+        return stat.S_IMODE(info.st_mode) == stat.S_IMODE(args[1])
+    return False
 
 
 def _allowed_subprocess(argv: Any) -> bool:
@@ -437,10 +514,12 @@ def _resolving(original: Callable[..., Any]) -> Callable[..., Any]:
 
     @functools.wraps(original)
     def resolve(path: Any, *args: Any, **kwargs: Any) -> Any:
+        result = original(path, *args, **kwargs)
         recorder = _ACTIVE
         if recorder is not None:
-            recorder.on_resolve(path, bool(kwargs.get("strict", args[0] if args else False)))
-        return original(path, *args, **kwargs)
+            strict = bool(kwargs.get("strict", args[0] if args else False))
+            recorder.on_resolve(path, strict, result)
+        return result
 
     return resolve
 
@@ -448,7 +527,7 @@ def _resolving(original: Callable[..., Any]) -> Callable[..., Any]:
 def _resolution(key: str) -> str:
     strict, _, path = key.partition("|")
     try:
-        return os.path.realpath(path, strict=strict == "1")
+        return _os_realpath(path, strict=strict == "1")
     except OSError as error:
         return f"error:{error.errno}"
 
@@ -528,7 +607,7 @@ class _Recording:
         self.recorder = _Recorder(
             _with_realpaths(excluded),
             _with_realpaths({tempfile.gettempdir()}),
-            _with_realpaths({str(project_root)}),
+            _with_realpaths(_protected_roots(project_root)),
             _with_realpaths(expiring),
             _with_realpaths(immutable),
         )
@@ -545,6 +624,7 @@ class _Recording:
             "readlink": os.readlink,
             "realpath": os.path.realpath,
             "environ_class": os.environ.__class__,
+            "environ_start": dict(os.environ),
             "stdout": sys.stdout,
             "stderr": sys.stderr,
         }
@@ -582,9 +662,18 @@ class _Recording:
         if not all(seen):
             self.recorder.violate("instrumentation-gap")
 
+    def _inputs_held(self) -> bool:
+        """Every input still looks as it did when the run first observed it."""
+        recorder = self.recorder
+        if any(_snapshot(path) != seen for path, seen in recorder.observed.items()):
+            return False
+        return all(_resolution(key) == seen for key, seen in recorder.resolved.items())
+
     def _forget(self, path: str) -> None:
         self.recorder.probed.discard(path)
-        self.recorder.resolved.difference_update({f"0|{path}", f"1|{path}"})
+        for key in (f"0|{path}", f"1|{path}"):
+            self.recorder.resolved.pop(key, None)
+        self.recorder.observed.pop(path, None)
 
     def __exit__(self, *exc: object) -> None:
         global _ACTIVE
@@ -607,6 +696,8 @@ class _Recording:
             return False
         if policy_fingerprint(project_root) != self.policy:
             return False
+        if not self._inputs_held():
+            return False
         output = [
             [channel, _SUMMARY.sub(_SUMMARY_PLACEHOLDER, chunk)] for channel, chunk in self.output
         ]
@@ -614,7 +705,9 @@ class _Recording:
             "key": self.key,
             "code": _code_identity(),
             "policy": self.policy,
-            "env": _env_digest(None if recorder.env_all else sorted(recorder.env)),
+            "env": _env_digest(
+                None if recorder.env_all else sorted(recorder.env), self._saved["environ_start"]
+            ),
             "env_names": None if recorder.env_all else sorted(recorder.env),
             "reads": {path: _file_digest(path) for path in sorted(recorder.reads)},
             "listed": {path: _listing(path) for path in sorted(recorder.listed)},
@@ -631,6 +724,19 @@ class _Recording:
         except OSError:
             return False
         return True
+
+
+def _protected_roots(project_root: Path) -> set[str]:
+    """Never scratch, even inside the temp dir: the project and every user-state root."""
+    from apm_cli.cache.paths import get_cache_root
+    from apm_cli.core.scope import get_apm_home
+
+    return {
+        str(project_root),
+        os.path.expanduser("~"),
+        str(get_apm_home()),
+        str(get_cache_root(ensure=False)),
+    }
 
 
 def _with_realpaths(roots: set[str]) -> tuple[str, ...]:
@@ -731,13 +837,29 @@ def _replay(stamp: dict[str, Any], started: float) -> None:
     sys.stderr.flush()
 
 
+_STAMP_MAPS = ("reads", "listed", "probed", "resolved")
+
+
 def _load(path: Path) -> dict[str, Any] | None:
+    """Read a stamp; anything malformed is no stamp (the full pipeline runs)."""
     try:
         with open(path, encoding="utf-8") as handle:
             data = json.load(handle)
     except (OSError, ValueError):
         return None
-    return data if isinstance(data, dict) else None
+    if not isinstance(data, dict) or not isinstance(data.get("key"), dict):
+        return None
+    if not all(isinstance(data.get(name), dict) for name in _STAMP_MAPS):
+        return None
+    if not isinstance(data.get("policy"), str) or not isinstance(data.get("env"), str):
+        return None
+    output = data.get("output")
+    if not isinstance(output, list) or not all(
+        isinstance(row, list) and len(row) == 2 and row[0] in (1, 2) and isinstance(row[1], str)
+        for row in output
+    ):
+        return None
+    return data
 
 
 def run_with_fast_path(

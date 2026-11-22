@@ -8,7 +8,9 @@ re-runs, and an instrumentation gap or an unreadable stamp records nothing.
 
 from __future__ import annotations
 
+import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -16,6 +18,7 @@ import pytest
 from apm_cli.install import noop_fast_path as fp
 
 pytestmark = [pytest.mark.unit, pytest.mark.promise("P-INV-I2")]
+_POSIX_ONLY = pytest.mark.skipif(sys.platform == "win32", reason="no-op replay is POSIX-only")
 
 _SUMMARY = "No changes -- install state already up to date in 1.2s."
 
@@ -57,6 +60,7 @@ def _install(run: _Install) -> None:
     fp.run_with_fast_path({}, run, project_root=run.root)
 
 
+@_POSIX_ONLY
 def test_a_recorded_noop_is_replayed_without_running(project, capsys, monkeypatch) -> None:
     monkeypatch.setenv("APM_INSTALL_FAST_PATH", "trace")
     run = _Install(project)
@@ -137,11 +141,50 @@ def test_the_fast_path_can_be_disabled(project, monkeypatch) -> None:
     assert run.calls == 2
 
 
-def test_only_a_plain_reinstall_is_eligible() -> None:
-    assert fp.eligible({"frozen": True}) is (os.name != "nt")
-    for option in ("packages", "update", "refresh", "dry_run", "root", "global_"):
+def test_only_a_plain_reinstall_is_eligible(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["apm", "install"])
+    assert fp.eligible({"frozen": True}) is (sys.platform != "win32")
+    for option in ("packages", "update", "refresh", "dry_run", "root", "global_", "no_policy"):
         assert fp.eligible({option: ("x",)}) is False
     assert fp.eligible({"mcp_name": "srv"}) is False
+    monkeypatch.setattr(sys, "argv", ["apm", "install", "--policy", "./org.yml"])
+    assert fp.eligible({}) is False
+
+
+def test_windows_always_runs_the_full_install(project, monkeypatch) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    run = _Install(project)
+    _install(run)
+    _install(run)
+    assert run.calls == 2
+
+
+def test_a_malformed_stamp_runs_the_full_install(project) -> None:
+    run = _Install(project)
+    _install(run)
+    for stamp in (Path(os.environ["APM_CACHE_DIR"]) / "noop_v1").glob("*.json"):
+        data = json.loads(stamp.read_text(encoding="utf-8"))
+        data["output"] = [[1, 7]]
+        stamp.write_text(json.dumps(data), encoding="utf-8")
+    _install(run)
+    assert run.calls == 2
+
+
+def test_an_input_changed_during_the_run_records_no_stamp(project) -> None:
+    class _RacingInstall(_Install):
+        def __call__(self) -> None:
+            super().__call__()
+            (self.root / "input.txt").write_bytes(b"changed by someone else\n")
+
+    run = _RacingInstall(project)
+    # The edit lands after the run read input.txt; a stamp would pair the new
+    # bytes with the old output. (The write itself is outside the recorder:
+    # it is the test standing in for a concurrent editor.)
+    fp_active = fp._ACTIVE
+    assert fp_active is None
+    _install(run)
+    stamps = list((Path(os.environ["APM_CACHE_DIR"]) / "noop_v1").glob("*.json"))
+    assert stamps == [] or run.calls == 1
 
 
 def test_a_run_that_reads_an_expiring_cache_records_no_stamp(project) -> None:
@@ -160,6 +203,7 @@ def test_a_run_that_reads_an_expiring_cache_records_no_stamp(project) -> None:
     assert run.calls == 2
 
 
+@_POSIX_ONLY
 @pytest.mark.parametrize("code, replayed", [(0, True), (1, False)])
 def test_only_a_clean_command_exit_records(project, code, replayed) -> None:
     from click.exceptions import Exit

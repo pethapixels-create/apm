@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -33,7 +34,11 @@ from tests.lifecycle.world.clone import clone
 from tests.lifecycle.world.scopes import use_policy
 from tests.lifecycle.world.services import ORG
 
-pytestmark = [pytest.mark.promise("P-INV-I2", "P-INV-I4")]
+pytestmark = [
+    pytest.mark.promise("P-INV-I2", "P-INV-I4"),
+    # The fast path never engages on Windows (os.path.exists is not observable there).
+    pytest.mark.skipif(sys.platform == "win32", reason="no-op replay is POSIX-only"),
+]
 
 _FAST_ENV = "APM_INSTALL_FAST_PATH"
 _HIT = "[i] install fast path: replayed a verified no-op"
@@ -47,7 +52,8 @@ def _declare(world: World, *keys: str) -> None:
     manifest.write_text(yaml.safe_dump(data), encoding="utf-8")
 
 
-def _digest(root: Path, skip: tuple[str, ...] = ()) -> dict[str, str]:
+def _digest(root: Path, skip: tuple[str, ...] = (), world: World | None = None) -> dict[str, str]:
+    """File digests under *root*; with *world*, its root path is normalized away."""
     files: dict[str, str] = {}
     for path in sorted(root.rglob("*")):
         rel = path.relative_to(root).as_posix()
@@ -56,18 +62,48 @@ def _digest(root: Path, skip: tuple[str, ...] = ()) -> dict[str, str]:
         if path.is_symlink():
             files[rel] = "link:" + str(path.readlink())
         elif path.is_file():
-            files[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+            data = path.read_bytes()
+            if world is not None:
+                data = data.replace(str(world.root).encode(), b"<ROOT>")
+            files[rel] = hashlib.sha256(data).hexdigest()
     return files
 
 
+# Caches (git objects, policy, stamps) are not install state; the stamp lives there.
+_HOME_CACHES = (".cache", "Library/Caches", ".apm/logs")
+# Per-checkout identity: a random installation id and receipts keyed by the
+# project path differ between two worlds that deployed the same content.
+_IDENTITY = (".apm-local", ".apm/deployment-receipts")
+
+
 def _state(world: World) -> dict[str, dict[str, str]]:
-    # Caches (git objects, policy, stamps) are not install state; the stamp
-    # lives there by design.
-    home_skip = (".cache", "Library/Caches", ".apm/logs")
+    """Raw bytes, for no-write checks within one world."""
     return {
         "project": _digest(world.project, (".git",)),
-        "home": _digest(world.home, home_skip),
+        "home": _digest(world.home, _HOME_CACHES),
     }
+
+
+def _comparable(world: World) -> dict[str, object]:
+    """Install state comparable across two worlds: identity fields and paths normalized."""
+    lock = yaml.safe_load((world.project / "apm.lock.yaml").read_text(encoding="utf-8"))
+    return {
+        "project": _digest(world.project, (".git", "apm.lock.yaml", *_IDENTITY), world),
+        "home": _digest(world.home, _HOME_CACHES + _IDENTITY, world),
+        "lock": _without_identity(lock, str(world.root)),
+    }
+
+
+def _without_identity(node: object, root: str) -> object:
+    if isinstance(node, dict):
+        return {
+            k: _without_identity(v, root)
+            for k, v in node.items()
+            if not re.search(r"install(ation)?_?id|receipt|generated_at", str(k))
+        }
+    if isinstance(node, list):
+        return [_without_identity(v, root) for v in node]
+    return node.replace(root, "<ROOT>") if isinstance(node, str) else node
 
 
 def _normalized(world: World, text: str) -> str:
@@ -176,7 +212,7 @@ def test_install_after_change_matches_the_full_pipeline(
             result.returncode,
             _normalized(world, result.stdout),
             _normalized(world, result.stderr),
-            _state(world),
+            _comparable(world),
         )
 
     fast, full = observed["fast"], observed["full"]
