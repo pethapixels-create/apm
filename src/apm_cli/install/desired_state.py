@@ -150,32 +150,32 @@ def plan_for(ctx: Any) -> str:
     org policy is the one the pipeline already routed (``ctx.policy_fetch``).
     APPLY is decided by the diff-apply owner (not yet wired).
     """
-    from apm_cli.core.scope import is_user_scope
-    from apm_cli.deps.lockfile import installed_apm_version
-    from apm_cli.install import noop_diff as proof
-
     try:
-        if proof.disabled() or any(getattr(ctx, name, None) for name in _FULL_RUN_OPTIONS):
-            return FULL
-        lock = ctx.existing_lockfile
-        root = Path(ctx.project_root)
-        if lock is None or is_user_scope(ctx.scope) or ctx.no_policy:
-            return FULL
-        if lock.apm_version != installed_apm_version():
-            return FULL
-        if lock.lsp_servers or lock.local_deployed_files or lock.local_staged_files:
-            return FULL
-        if not (
-            proof._copies_valid(root, lock)
-            and proof._install_audit_off()
-            and proof._sources_scan_clean(root, lock)
-        ):
-            return FULL
-        state = state_from(root, lock, ctx.apm_package, ctx.targets or ())
-        if not actual_vs_desired(state).empty:
-            return FULL
-        if proof._gates_current(state, ctx.policy_fetch) is not None:
-            return FULL
+        return EMPTY if _empty_proven(ctx) else FULL
     except Exception:
         return FULL
-    return EMPTY
+
+
+def _empty_proven(ctx: Any) -> bool:
+    from apm_cli.core.scope import is_user_scope
+    from apm_cli.install import noop_diff as proof
+
+    if proof.disabled() or any(getattr(ctx, name, None) for name in _FULL_RUN_OPTIONS):
+        return False
+    lock = ctx.existing_lockfile
+    root = Path(ctx.project_root)
+    if (
+        lock is None
+        or is_user_scope(ctx.scope)
+        or ctx.no_policy
+        or proof._lock_reason(lock, renders_mcp=True)
+    ):
+        return False
+    if not (
+        proof._copies_valid(root, lock)
+        and proof._install_audit_off()
+        and proof._sources_scan_clean(root, lock)
+    ):
+        return False
+    state = state_from(root, lock, ctx.apm_package, ctx.targets or ())
+    return actual_vs_desired(state).empty and proof._gates_current(state, ctx.policy_fetch) is None

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -70,6 +71,10 @@ def _policy_admits(project_root: Path) -> tuple[bool, Any]:
     if route.blocks or route.unresolved:
         return False, fetch
     if fetch.cache_stale or fetch.fetch_error or fetch.warnings:
+        return False, fetch
+    # Output parity: any other outcome is announced by the full pipeline
+    # (rule (a): a line the early exit does not render takes the full run).
+    if getattr(fetch, "outcome", None) != "absent":
         return False, fetch
     return True, fetch
 
@@ -189,9 +194,22 @@ def _policy_checks_pass(project_root: Path, fetch: Any) -> bool:
     return all(check.passed for check in result.checks)
 
 
+def _lock_reason(lock: Any, *, renders_mcp: bool = False) -> str | None:
+    from apm_cli.deps.lockfile import installed_apm_version
+
+    if lock.apm_version != installed_apm_version():
+        return "lockfile from another APM version"
+    if lock.lsp_servers or lock.local_deployed_files or lock.local_staged_files:
+        return "local content or LSP"
+    if not renders_mcp and (lock.mcp_servers or lock.mcp_configs):
+        # Output parity: the MCP phase prints its block and parked-server
+        # warnings on every install; not rendered here yet.
+        return "MCP servers"
+    return None
+
+
 def full_run_reason(project_root: Path) -> str | None:
     """Why a plain install of *project_root* would change something; None if it would not."""
-    from apm_cli.deps.lockfile import installed_apm_version
     from apm_cli.install.desired_state import actual_vs_desired, build_desired_state
     from apm_cli.policy.ci_checks import resolve_audit_scope
 
@@ -199,29 +217,29 @@ def full_run_reason(project_root: Path) -> str | None:
     if state is None:
         return "no lockfile or apm.yml"
     lock = state.lock
-    if lock.apm_version != installed_apm_version():
-        return "lockfile from another APM version"
-    if lock.lsp_servers or lock.local_deployed_files or lock.local_staged_files:
-        return "local content or LSP"
     root, user_scope, _targets = resolve_audit_scope(project_root, lock)
-    if user_scope or root != project_root:
-        return "scope"
-    admits, fetch = _policy_admits(project_root)
-    if not admits:
-        return "org policy"
-    if not _copies_valid(project_root, lock):
-        return "package copies"
-    if not _install_audit_off():
-        return "install-time audit enabled"
-    if not _sources_scan_clean(project_root, lock):
-        return "security scan findings"
-    if not actual_vs_desired(state).empty:
-        return "deployed files differ"
-    failed = _gates_current(state, fetch)
-    if failed:
-        return failed
-    if not _policy_checks_pass(project_root, fetch):
-        return "policy checks"
+    fetch: list[Any] = []
+
+    def policy_admits() -> bool:
+        admits, result = _policy_admits(project_root)
+        fetch.append(result)
+        return admits
+
+    checks: tuple[tuple[str, Callable[[], object]], ...] = (
+        ("lockfile", lambda: _lock_reason(lock)),
+        ("scope", lambda: user_scope or root != project_root),
+        ("org policy", lambda: not policy_admits()),
+        ("package copies", lambda: not _copies_valid(project_root, lock)),
+        ("install-time audit enabled", lambda: not _install_audit_off()),
+        ("security scan findings", lambda: not _sources_scan_clean(project_root, lock)),
+        ("deployed files differ", lambda: not actual_vs_desired(state).empty),
+        ("gates", lambda: _gates_current(state, fetch[0])),
+        ("policy checks", lambda: not _policy_checks_pass(project_root, fetch[0])),
+    )
+    for reason, failed in checks:
+        found = failed()
+        if found:
+            return found if isinstance(found, str) else reason
     return None
 
 
@@ -251,13 +269,51 @@ def try_noop(options: dict[str, Any], argv: list[str] | None, project_root: Path
         if trace:
             _trace(f"[i] install fast path: full run ({reason})")
         return False
-    from apm_cli.utils.console import _rich_info
-
-    elapsed = time.perf_counter() - started
-    _rich_info(f"No changes -- install state already up to date in {elapsed:.1f}s.", symbol="info")
+    _render_noop(project_root, started)
     if trace:
         _trace("[i] install fast path: no-op (desired state already deployed)")
     return True
+
+
+def _render_noop(project_root: Path, started: float) -> None:
+    """Print what the full pipeline prints for this no-op, through the same owners.
+
+    Header and target line (``InstallLogger``, ``target_detection``), one
+    cached-package header and ``(files unchanged)`` line per locked package in
+    install order (depth, then identity), then the post-install summary.
+    """
+    from apm_cli.core.command_logger import InstallLogger
+    from apm_cli.core.scope import manifest_file
+    from apm_cli.core.target_detection import format_provenance, resolve_targets
+    from apm_cli.deps.lockfile import LockFile, get_lockfile_path
+    from apm_cli.install.summary import render_post_install_summary
+    from apm_cli.models.apm_package import APMPackage, package_target_declaration
+    from apm_cli.utils.short_sha import format_short_sha
+
+    lock = LockFile.read(get_lockfile_path(project_root))
+    manifest = APMPackage.from_apm_yml(manifest_file(project_root))
+    logger = InstallLogger(verbose=False, dry_run=False, partial=False)
+    logger.resolution_start(to_install_count=0, lockfile_count=0, update_count=0)
+    resolved = resolve_targets(
+        project_root, flag=None, yaml_targets=package_target_declaration(manifest).restriction()
+    )
+    logger.announce_targets(format_provenance(resolved))
+    for dep in lock.get_all_dependencies():
+        if dep.get_unique_key() == ".":
+            continue
+        dep_ref = dep.to_dependency_ref()
+        name = str(dep_ref) if dep_ref.is_virtual else dep_ref.repo_url
+        ref = dep.resolved_ref or dep_ref.reference or ""
+        sha = format_short_sha(dep.resolved_commit) if dep.resolved_commit else ""
+        logger.download_complete(name, ref=ref, sha=sha, cached=True)
+        logger.tree_item("  |-- (files unchanged)")
+    render_post_install_summary(
+        logger=logger,
+        apm_count=0,
+        mcp_count=0,
+        force=False,
+        elapsed_seconds=time.perf_counter() - started,
+    )
 
 
 def _trace(text: str) -> None:

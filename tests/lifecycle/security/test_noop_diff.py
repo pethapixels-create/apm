@@ -265,6 +265,13 @@ def test_install_after_change_matches_the_full_pipeline(
     assert fast[3] == full[3], "installed state differs from the full pipeline"
 
 
+def _arrange_plain(world: World) -> None:
+    """A skill-only project: no executables, no MCP server, no org policy."""
+    _declare(world, "p-skill:git")
+    installed = _run(world, ("install",), fast="0")
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+
+
 def test_noop_exit_writes_nothing_and_matches_the_full_noop(
     lifecycle_template: World, tmp_path: Path
 ) -> None:
@@ -272,7 +279,7 @@ def test_noop_exit_writes_nothing_and_matches_the_full_noop(
     full = clone(lifecycle_template, tmp_path / "full")
     for name, world in (("fast", fast), ("full", full)):
         world.services.reset()
-        _arrange(world, "none")
+        _arrange_plain(world)
         _converge(world, fast=name == "fast")
     before = _state(fast)
     world_cache = json.dumps(sorted(_digest(fast.home).items()))
