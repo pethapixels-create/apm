@@ -520,3 +520,99 @@ def test_unmanaged_files_deny_blocks_an_install_that_would_leave_drift(lifecycle
     assert result.returncode == 1, _text(result)
     assert "hand-written.instructions.md" in _text(result), _text(result)
     assert (lifecycle_world.project / _UNMANAGED).is_file()
+
+
+# -- G8: security.audit.fail_on_drift (policy-schema.md, security section) ----------
+
+
+@pytest.mark.parametrize("fail_on_drift", [True, False], ids=["on", "off"])
+def test_fail_on_drift_decides_the_bare_audit_exit_code(lifecycle_world, fail_on_drift) -> None:
+    """security.audit.fail_on_drift -- a bare ``apm audit`` exits non-zero on drift only when on."""
+    installed = driver.run(
+        lifecycle_world, ["install", lifecycle_world.packages["p-skill:git"].spec]
+    )
+    assert installed.returncode == 0, _text(installed)
+    skill = lifecycle_world.project / ".agents/skills/p-skill/SKILL.md"
+    skill.write_text(skill.read_text(encoding="utf-8") + "\nEdited by hand.\n", encoding="utf-8")
+    _serve_policy(
+        lifecycle_world,
+        f"policy-g8-drift-{'on' if fail_on_drift else 'off'}",
+        {
+            "name": "g8",
+            "version": "1.0",
+            "enforcement": "block",
+            # mcp.self_defined keeps the off policy non-empty, so it is enforced too.
+            "mcp": {"self_defined": "allow"},
+            "security": {"audit": {"fail_on_drift": fail_on_drift}},
+        },
+    )
+    audit = driver.run(lifecycle_world, ["audit"])
+    assert (audit.returncode != 0) is fail_on_drift, _text(audit)
+    assert "SKILL.md" in _text(audit), _text(audit)
+    assert "Edited by hand." in skill.read_text(encoding="utf-8")
+
+
+# -- G9: dependencies.require_pinned_constraint, manifest.require_explicit_includes -
+
+
+@pytest.mark.parametrize(
+    ("ref", "refused"),
+    [("", True), ("#main", True), ("#v1.0.0", False)],
+    ids=["no-ref", "bare-branch", "literal-tag"],
+)
+def test_require_pinned_constraint_refuses_an_unbounded_direct_dependency(
+    lifecycle_world, ref, refused
+) -> None:
+    """require_pinned_constraint -- install refuses a direct dep without a bounded ref."""
+    _serve_policy(
+        lifecycle_world,
+        f"policy-g9-pinned-{ref.strip('#') or 'none'}",
+        {
+            "name": "g9",
+            "version": "1.0",
+            "enforcement": "block",
+            "dependencies": {"require_pinned_constraint": True},
+        },
+    )
+    manifest = lifecycle_world.project / "apm.yml"
+    before = manifest.read_bytes()
+    result = driver.run(lifecycle_world, ["install", f"lifecycle/p-skill{ref}"])
+    if refused:
+        assert result.returncode == 1, _text(result)
+        assert "require_pinned_constraint" in _text(result), _text(result)
+        assert manifest.read_bytes() == before
+        assert not (lifecycle_world.project / ".agents/skills/p-skill").exists()
+    else:
+        assert result.returncode == 0, _text(result)
+
+
+@pytest.mark.parametrize(
+    ("includes", "fails"),
+    [(None, True), ("auto", True), ([".apm/"], False)],
+    ids=["absent", "auto", "explicit-list"],
+)
+def test_require_explicit_includes_in_audit(lifecycle_world, includes, fails) -> None:
+    """manifest.require_explicit_includes -- audit --ci fails unless apm.yml lists includes."""
+    _serve_policy(
+        lifecycle_world,
+        f"policy-g9-includes-{'none' if includes is None else 'auto' if includes == 'auto' else 'list'}",
+        {
+            "name": "g9",
+            "version": "1.0",
+            "enforcement": "block",
+            "manifest": {"require_explicit_includes": True},
+        },
+    )
+    manifest = lifecycle_world.project / "apm.yml"
+    data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+    data.pop("includes", None)
+    if includes is not None:
+        data["includes"] = includes
+    manifest.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    audit = driver.run(lifecycle_world, ["audit", "--ci"])
+    text = _text(audit)
+    if fails:
+        assert audit.returncode == 1, text
+        assert "explicit-includes" in text, text
+    else:
+        assert "Manifest declares explicit includes paths" in text, text
