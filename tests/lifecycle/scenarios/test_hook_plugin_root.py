@@ -12,7 +12,6 @@ that reads ``<plugin root>/skills/...`` fails there (strict known cell).
 from __future__ import annotations
 
 import json
-import re
 import subprocess
 
 import pytest
@@ -93,11 +92,10 @@ def test_the_codex_hook_reads_the_skill_its_plugin_bundles(lifecycle_world) -> N
     manifest.write_text(yaml.safe_dump(data), encoding="utf-8")
 
     output = _install(world)
-    approval = re.search(r"apm approve '([^']+)'", output)
-    if approval:
-        approved = driver.run(world, ("approve", approval.group(1)))
-        assert approved.returncode == 0, approved.stdout + approved.stderr
-        output += _install(world)
+    assert f"'apm approve lifecycle/{_PLUGIN}'" in output, "the hooks park until approved"
+    approved = driver.run(world, ("approve", f"lifecycle/{_PLUGIN}"))
+    assert approved.returncode == 0, approved.stdout + approved.stderr
+    output += _install(world)
 
     hook = world.project / ".codex" / "hooks" / _PLUGIN / "hooks" / "session-start"
     codex = sorted(
