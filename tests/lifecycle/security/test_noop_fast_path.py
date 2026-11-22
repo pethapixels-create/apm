@@ -124,14 +124,15 @@ def _run(world: World, argv: tuple[str, ...], *, fast: str | None):
 
 
 def _converge(world: World, *, fast: bool) -> None:
-    for attempt in range(3):
-        trace = fast and attempt == 2
+    """Install, then three no-ops: pending marker, recording, and (fast world) a replay."""
+    for attempt in range(4):
+        trace = fast and attempt == 3
         mode = "trace" if trace else (None if fast else "0")
         result = _run(world, ("install",), fast=mode)
         assert result.returncode == 0, result.stdout + result.stderr
         if trace:
             assert _HIT in result.stderr, (
-                "the converged third install must replay the recorded no-op:\n"
+                "the converged fourth install must replay the recorded no-op:\n"
                 + result.stdout
                 + result.stderr
             )
@@ -163,6 +164,24 @@ def _delete(world: World) -> None:
     _first_deployed(world).unlink()
 
 
+def _user_config(world: World) -> Path:
+    return world.apm_home / "config.json"
+
+
+def _revoke_user_approval(world: World) -> None:
+    """Drop the user-scope grant of p-exec from ~/.apm/config.json (apm.yml untouched)."""
+    config = _user_config(world)
+    data = json.loads(config.read_text(encoding="utf-8"))
+    ref = world.packages["p-exec:git"]
+    identities = (ref.spec, ref.name, f"{ORG}/{ref.name}")
+    allow = data.get("executables", {}).get("allow", {})
+    dropped = [k for k in list(allow) if any(k == i or k.startswith(i + "#") for i in identities)]
+    assert dropped, f"no user approval of p-exec to revoke in {allow}"
+    for entry in dropped:
+        del allow[entry]
+    config.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
 def _user_deny(world: World) -> None:
     denied = driver.run(world, ("deny", f"{ORG}/p-exec"), scope="user")
     assert denied.returncode == 0, denied.stdout + denied.stderr
@@ -177,15 +196,22 @@ CHANGES: dict[str, Callable[[World], None]] = {
     "tampered-deployed-file": _tamper,
     "deleted-deployed-file": _delete,
     "user-deny-after-approval": _user_deny,
+    "revoked-user-approval": _revoke_user_approval,
     "policy-denies-dependency": _policy("deny-pkg"),
     "policy-denies-executables": _policy("exec-deny-all"),
 }
 
 
-def _arrange(world: World) -> None:
+def _arrange(world: World, change: str) -> None:
     use_policy(world, "allow")
     _declare(world, "p-exec:git", "p-skill:git")
-    _approve_exec(world)
+    if change == "revoked-user-approval":
+        # The grant lives only in the user store, so revoking it leaves apm.yml
+        # and the lockfile byte-identical.
+        approved = driver.run(world, ("approve", f"{ORG}/p-exec"), scope="user")
+        assert approved.returncode == 0, approved.stdout + approved.stderr
+    else:
+        _approve_exec(world)
 
 
 @pytest.mark.parametrize("change", sorted(CHANGES))
@@ -198,7 +224,7 @@ def test_install_after_change_matches_the_full_pipeline(
     }
     for name, world in worlds.items():
         world.services.reset()
-        _arrange(world)
+        _arrange(world, change)
         _converge(world, fast=name == "fast")
     manifests = {n: (w.project / "apm.yml").read_bytes() for n, w in worlds.items()}
     locks = {n: (w.project / "apm.lock.yaml").read_bytes() for n, w in worlds.items()}
@@ -206,8 +232,8 @@ def test_install_after_change_matches_the_full_pipeline(
     observed = {}
     for name, world in worlds.items():
         CHANGES[change](world)
-        if change != "user-deny-after-approval" and not change.startswith("policy"):
-            assert (world.project / "apm.yml").read_bytes() == manifests[name]
+        # Every change happens outside apm.yml and the lockfile (QL bar item 3).
+        assert (world.project / "apm.yml").read_bytes() == manifests[name]
         assert (world.project / "apm.lock.yaml").read_bytes() == locks[name]
         result = _run(world, ("install",), fast=None if name == "fast" else "0")
         observed[name] = (
@@ -234,7 +260,7 @@ def test_replayed_noop_writes_nothing_and_matches_the_full_noop(
     full = clone(lifecycle_template, tmp_path / "full")
     for name, world in (("fast", fast), ("full", full)):
         world.services.reset()
-        _arrange(world)
+        _arrange(world, "none")
         _converge(world, fast=name == "fast")
     before = _state(fast)
     world_cache = json.dumps(sorted(_digest(fast.home).items()))
