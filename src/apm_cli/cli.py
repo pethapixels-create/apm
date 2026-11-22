@@ -224,7 +224,7 @@ _LAZY_COMMANDS: tuple[tuple[str, str, str, str | None, str | None, bool], ...] =
     ),
     (
         "install",
-        "apm_cli.commands.install",
+        "apm_cli.commands.install_entry",
         "install",
         None,
         "Install APM, MCP, and LSP dependencies",

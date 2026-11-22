@@ -54,7 +54,9 @@ SERIALIZED_LIFECYCLE_ROUTES: dict[str, dict[str, str]] = {
         "reset_flags": "serialized_lifecycle",
     },
     "src/apm_cli/commands/init.py": {"init": "serialized_lifecycle_unless"},
-    "src/apm_cli/commands/install.py": {"install": "serialized_lifecycle_unless_fresh_preview"},
+    "src/apm_cli/commands/install_entry.py": {
+        "install": "serialized_lifecycle_unless_fresh_preview"
+    },
     "src/apm_cli/commands/lifecycle.py": {
         "lifecycle_init": "serialized_lifecycle",
         "lifecycle_trust": "serialized_lifecycle",
@@ -93,7 +95,7 @@ _DELEGATED: dict[_Command, tuple[_Command, ...]] = {
     (_COMPILE, "compile"): ((_COMPILE, "_handle_global_flag"), (_COMPILE, "_run_compilation")),
     (_LOCK, "lock"): ((_LOCK, "_run_lock"),),
     ("src/apm_cli/commands/mcp.py", "mcp_install"): (
-        ("src/apm_cli/commands/install.py", "install"),
+        ("src/apm_cli/commands/install_entry.py", "install"),
     ),
 }
 

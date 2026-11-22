@@ -197,7 +197,8 @@ def _check_advice(provider: FactsProvider) -> Iterable[Violation]:
 
 # -- Landed help and advice fixes (#3994, #4004) --------------------------------
 
-_INSTALL_COMMAND = "src/apm_cli/commands/install.py"
+# The install Click options (and their help) live in the light entry module.
+_INSTALL_COMMAND = "src/apm_cli/commands/install_entry.py"
 _INIT_COMMAND = "src/apm_cli/commands/init.py"
 _FROZEN_HELP = "or when deployed files do not match the hashes it records"
 

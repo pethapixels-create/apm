@@ -6079,7 +6079,7 @@ def test_output_owner_guards_catch_bypasses(rule_id: str, path: str, old: str, n
     [
         pytest.param(
             "contracts-tooling-remediation-advice",
-            "src/apm_cli/commands/install.py",
+            "src/apm_cli/commands/install_entry.py",
             '"config state, or when deployed files do not match the hashes it records "',
             '"config state "',
             id="frozen-help-drops-hash-refusal",

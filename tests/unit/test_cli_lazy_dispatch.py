@@ -112,10 +112,12 @@ def test_config_get_does_not_load_heavyweight_commands():
     assert output_ok
 
 
-def test_install_help_does_load_install_command():
+def test_install_help_loads_only_the_light_install_command():
     exit_code, loaded, output_ok = _run_probe(["install", "--help"], "Usage:")
     assert exit_code == 0
-    assert "apm_cli.commands.install" in loaded.split(",")
+    # The Click command lives in install_entry; the install graph behind
+    # commands.install loads only when the command body runs.
+    assert loaded == ""
     assert output_ok
 
 

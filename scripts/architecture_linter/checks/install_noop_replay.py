@@ -5,8 +5,10 @@ install. Its proof must keep the live checks it adds on top of the
 recorded inputs: org policy re-discovery routed by the outcome owner
 (``discover_trust_policy`` + ``classify_project_policy``) and
 the lockfile content-hash verifier (``verify_deployed_file_hashes``). Only the
-``apm install`` command (commands/install.py) may engage it, and no other
-module installs process-wide audit hooks.
+``apm install`` Click command (commands/install_entry.py) may engage it, as
+the single ``run_with_fast_path`` call of its callback, before the install
+graph behind commands/install.py is imported; no other module installs
+process-wide audit hooks.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ from scripts.architecture_linter.models import Violation
 RULE_NOOP_REPLAY = "install-deployment-noop-replay-owner"
 
 _OWNER = "src/apm_cli/install/noop_fast_path.py"
-_ENGAGER = "src/apm_cli/commands/install.py"
+_ENGAGER = "src/apm_cli/commands/install_entry.py"
 _SOURCE_TREE = "src/apm_cli/"
 _LIVE_CHECKS = (
     (re.compile(r"\bdiscover_trust_policy\(project_root\)"), "live org policy discovery"),
@@ -41,22 +43,15 @@ _LIVE_CHECKS = (
     (re.compile(r"\bdeployed_hashes_intact\(project_root\)"), "the deployed-hash check on replay"),
 )
 _ENGAGE = re.compile(r"\bnoop_fast_path\b")
-# The decorator must sit directly on the install click callback.
-_DECORATED_INSTALL = re.compile(r"^@noop_fast_path$")
-_INSTALL_DEF = re.compile(r"^def install\(")
+# The install Click callback engages the replay exactly once.
+_ENGAGE_CALL = re.compile(r"\breturn run_with_fast_path\(")
+_INSTALL_DEF = re.compile(r"^def install\(ctx, dry_run, \*\*options\):$")
 _AUDIT_HOOK = re.compile(r"\bsys\.addaudithook\(")
 
 
-def _decorates_install(lines) -> bool:
-    """``@noop_fast_path`` is the decorator line right above ``def install(``."""
-    texts = [text.strip() for _, text in lines]
-    return (
-        any(
-            _INSTALL_DEF.match(texts[i]) and i > 0 and _DECORATED_INSTALL.match(texts[i - 1])
-            for i in range(len(texts))
-        )
-        and _count_re(lines, _DECORATED_INSTALL) == 1
-    )
+def _engages_install(lines) -> bool:
+    """The entry defines the install callback and returns one ``run_with_fast_path`` call."""
+    return _count_re(lines, _INSTALL_DEF) == 1 and _count_re(lines, _ENGAGE_CALL) == 1
 
 
 def check_noop_replay_owner(provider: FactsProvider) -> tuple[Violation, ...]:
@@ -72,12 +67,12 @@ def check_noop_replay_owner(provider: FactsProvider) -> tuple[Violation, ...]:
             findings.append(
                 _report(rule_id, _OWNER, f"a replayed no-op must re-run {what} exactly once")
             )
-    if not _decorates_install(engager):
+    if not _engages_install(engager):
         findings.append(
             _report(
                 rule_id,
                 _ENGAGER,
-                "apm install's callback must be decorated with @noop_fast_path directly",
+                "apm install's callback must return run_with_fast_path(...) exactly once",
             )
         )
     others = _tree_python_paths(provider, _SOURCE_TREE, excluded=(_OWNER, _ENGAGER))
@@ -87,7 +82,7 @@ def check_noop_replay_owner(provider: FactsProvider) -> tuple[Violation, ...]:
             rule_id=rule_id,
             paths=others,
             pattern=_ENGAGE,
-            message="Only apm install (commands/install.py) engages the no-op replay",
+            message="Only apm install (commands/install_entry.py) engages the no-op replay",
             configured=False,
             respect_exempt=False,
         )
