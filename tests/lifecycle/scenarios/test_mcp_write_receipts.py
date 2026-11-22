@@ -25,6 +25,7 @@ import json
 
 import pytest
 
+from tests.lifecycle.known import KnownFailure
 from tests.lifecycle.scenarios._kit import Scenario, assert_changes, credits
 from tests.lifecycle.world import use_policy
 from tests.utils.local_package import LocalPackageFactory
@@ -69,18 +70,24 @@ CREDITS = credits(
 )
 
 
-def _servers(scenario: Scenario) -> dict:
-    path = scenario.world.project / ".mcp.json"
+def _servers(scenario: Scenario, config: str = ".mcp.json") -> dict:
+    path = scenario.world.project / config
     if not path.is_file():
         return {}
     return json.loads(path.read_text(encoding="utf-8")).get("mcpServers") or {}
 
 
-def _start(world) -> Scenario:
+def _start(world, targets: tuple[str, ...] = ("copilot",)) -> Scenario:
     use_policy(world, "allow")
     factory = LocalPackageFactory(world.root / "owned")
     package = factory.create("o-mcp", version="1.0.0", mcp_dependencies=[_DECLARATION])
-    return Scenario(world, {"o-mcp": str(package.root)}, kinds={"o-mcp": ("mcp",)}, policy="allow")
+    return Scenario(
+        world,
+        {"o-mcp": str(package.root)},
+        kinds={"o-mcp": ("mcp",)},
+        policy="allow",
+        targets=targets,
+    )
 
 
 def _deploy(scenario: Scenario) -> None:
@@ -170,4 +177,36 @@ def test_an_unproven_entry_is_kept_and_reported_without_the_lockfile(
     rerun = scenario.run("install")
     assert config.read_bytes() == before
     assert _KEPT in rerun.output, "the keep is reported on every install"
+    scenario.finish()
+
+
+_RETARGET = KnownFailure(
+    "#4784",
+    "without a lockfile, install keeps an MCP entry for a runtime it no longer targets",
+    r"stays configured for a runtime install no longer targets",
+)
+
+
+@_RETARGET.mark()
+def test_an_apm_written_entry_for_a_runtime_no_longer_targeted_is_retired_without_the_lockfile(
+    lifecycle_world,
+) -> None:
+    """The server stays declared; only cursor leaves the targets, and the lock is gone."""
+    scenario = _start(lifecycle_world, targets=("copilot", "cursor"))
+    _deploy(scenario)
+    assert SERVER in _servers(scenario, ".cursor/mcp.json"), "the server must deploy for cursor"
+    scenario.set_targets("copilot")
+    scenario.lock_path.unlink()
+    scenario.model = scenario.model.with_lock("absent")
+
+    step = scenario.run("install")
+
+    assert step.result.returncode == 0, step.output
+    assert SERVER in _servers(scenario), "the entry for the targeted runtime must stay"
+    # Retired, or kept and reported (the evidence cannot prove ownership): never silent.
+    kept_reported = f"Kept MCP server '{SERVER}' in .cursor/mcp.json" in step.output
+    assert SERVER not in _servers(scenario, ".cursor/mcp.json") or kept_reported, (
+        f"the entry APM wrote to .cursor/mcp.json stays configured for a runtime install "
+        f"no longer targets, unreported:\n{step.output}"
+    )
     scenario.finish()
