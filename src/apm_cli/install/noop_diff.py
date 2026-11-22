@@ -43,7 +43,9 @@ def disabled() -> bool:
 
 
 # Options a no-op may carry; any other set option takes the full pipeline.
-_NEUTRAL_OPTIONS = frozenset({"frozen", "parallel_downloads"})
+# --frozen prints its own verification lines; until they are rendered here it
+# takes the full pipeline (output parity, rule (a)).
+_NEUTRAL_OPTIONS = frozenset({"parallel_downloads"})
 
 
 def eligible(options: dict[str, Any], argv: list[str] | None) -> bool:
@@ -203,10 +205,7 @@ def _lock_reason(lock: Any, *, renders_mcp: bool = False) -> str | None:
         return "lockfile from another APM version"
     if lock.lsp_servers or lock.local_deployed_files or lock.local_staged_files:
         return "local content or LSP"
-    if not renders_mcp and (lock.mcp_servers or lock.mcp_configs):
-        # Output parity: the MCP phase prints its block and parked-server
-        # warnings on every install; not rendered here yet.
-        return "MCP servers"
+    del renders_mcp  # both paths run the real MCP phase
     return None
 
 
@@ -309,12 +308,79 @@ def _render_noop(project_root: Path, started: float) -> None:
         sha = format_short_sha(dep.resolved_commit) if dep.resolved_commit else ""
         logger.download_complete(name, ref=ref, sha=sha, cached=True)
         logger.tree_item("  |-- (files unchanged)")
+    services = _run_services(project_root, manifest, lock, logger)
     render_post_install_summary(
         logger=logger,
         apm_count=0,
-        mcp_count=0,
+        mcp_count=services.mcp_count,
+        lsp_count=services.lsp_count,
+        apm_diagnostics=logger.diagnostics,
         force=False,
         elapsed_seconds=time.perf_counter() - started,
+    )
+
+
+def _run_services(project_root: Path, manifest: Any, lock: Any, logger: Any) -> Any:
+    """The install's MCP/LSP reconciliation phase itself, as a plain install runs it.
+
+    It prints the MCP block and parked-server warnings exactly as the full
+    pipeline does, and repairs a drifted server config the same way.
+    """
+    from types import SimpleNamespace
+
+    from apm_cli.constants import InstallMode
+    from apm_cli.core.scope import InstallScope
+    from apm_cli.deps.lockfile import get_lockfile_path
+    from apm_cli.install.service import FrozenDisposition
+    from apm_cli.install.service_integration import run_service_integrations
+    from apm_cli.install.template import effective_allow_map
+    from apm_cli.policy.outcome_routing import discover_trust_policy
+
+    trust = SimpleNamespace(
+        policy_fetch=discover_trust_policy(project_root),
+        source_root=project_root,
+        project_root=project_root,
+        scope=InstallScope.PROJECT,
+        apm_package=manifest,
+        logger=logger,
+        dry_run=False,
+        exec_trust_ctx=None,
+        exec_allow_map=None,
+    )
+    allow_map = effective_allow_map(trust)
+    command = SimpleNamespace(
+        project_root=project_root,
+        scope=InstallScope.PROJECT,
+        install_mode=InstallMode.ALL,
+        logger=logger,
+        runtime=None,
+        exclude=None,
+        trust_transitive_mcp=False,
+        no_policy=False,
+        verbose=False,
+        force=False,
+        update=False,
+        exec_allow_map=allow_map,
+        exec_allow_resolved=trust.exec_trust_ctx is not None,
+        mcp_policy_enforced=False,
+    )
+    mcp_deps = manifest.get_all_mcp_dependencies()
+    return run_service_integrations(
+        command,
+        apm_package=manifest,
+        mcp_deps=mcp_deps if isinstance(mcp_deps, list) else [],
+        lock_path=get_lockfile_path(project_root),
+        existing_lock=lock,
+        old_mcp_servers=set(lock.mcp_servers),
+        old_mcp_configs=dict(lock.mcp_configs),
+        old_mcp_provenance=dict(lock.mcp_config_provenance),
+        old_mcp_target_servers=dict(lock.mcp_target_servers),
+        old_mcp_target_servers_present=lock._mcp_target_servers_present,
+        diagnostics=logger.diagnostics,
+        explicit_target=None,
+        target_decision=None,
+        active_package_keys=frozenset(k for k in lock.dependencies if k != "."),
+        frozen_disposition=FrozenDisposition(replay=False),
     )
 
 
