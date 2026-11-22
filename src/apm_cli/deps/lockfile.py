@@ -5,6 +5,7 @@ Provides deterministic, reproducible installs by capturing exact resolved versio
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -208,12 +209,13 @@ def _keeps_untranslated_mcp_stamp(lock: LockFile, existing: LockFile | None) -> 
     return lock_holds_untranslated_mcp_claims(existing.apm_version, carried)
 
 
-def _same_document(current: str | None, serialized: str) -> bool:
-    """Whether *current* holds the data *serialized* would write; only formatting may differ."""
+def _same_document(current: str | None, serialized: str, parsed: object = None) -> bool:
+    """Whether *current* (already loaded as *parsed*, #4742) holds what *serialized* writes."""
     from ..utils.yaml_io import load_yaml_str
 
     try:
-        return current is not None and load_yaml_str(current) == load_yaml_str(serialized)
+        loaded = parsed if parsed is not None else load_yaml_str(current or "")
+        return current is not None and loaded == load_yaml_str(serialized)
     except (UnicodeError, yaml.YAMLError, ValueError):
         return False
 
@@ -1763,7 +1765,7 @@ class LockFile:
         from .lockfile_write_authority import stage_lockfile, staged_lockfile_text
 
         existing: LockFile | None
-        legacy_timestamp_present = False
+        legacy_timestamp_present, existing_document = False, None
         existing_text = staged_lockfile_text(path)
         if isinstance(existing_lockfile, _ExistingLockfileUnset) and existing_text is not None:
             try:
@@ -1773,9 +1775,10 @@ class LockFile:
             existing = None
             if isinstance(existing_data, dict):
                 legacy_timestamp_present = existing_data.get("generated_at") is not None
+                existing_document = existing_data  # validation normalizes a copy
                 try:
                     existing = type(self)._from_validated_data(
-                        _validate_lockfile_container(existing_data)
+                        _validate_lockfile_container(copy.deepcopy(existing_data))
                     )
                 except UnsupportedLockfileVersionError as exc:
                     if legacy_timestamp_present:
@@ -1821,7 +1824,7 @@ class LockFile:
             self.apm_version = installed_apm_version()
         serialized = self.to_yaml(user_scope=user_scope)
         assert_no_staging_paths(serialized, path.name)
-        if unchanged and _same_document(existing_text, serialized):
+        if unchanged and _same_document(existing_text, serialized, existing_document):
             # A proven no-op keeps the file's own bytes (comments, key style).
             return True
         if not stage_lockfile(path, serialized):
