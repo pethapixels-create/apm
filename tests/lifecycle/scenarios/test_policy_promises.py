@@ -355,3 +355,80 @@ def test_self_defined_deny_refuses_an_inline_server(lifecycle_world) -> None:
     assert "self-defined" in _text(result), _text(result)
     assert not _configured(lifecycle_world, "p-inline"), _text(result)
     assert manifest.read_bytes() == before
+
+
+# -- G3: dependencies.max_depth (policy-schema.md, dependencies section) -----------
+
+
+def _three_deep(world) -> str:
+    """t-a -> t-b -> t-c (local packages); returns t-a."""
+    factory = LocalPackageFactory(world.root / "g3")
+    for name, child in (("t-c", None), ("t-b", "t-c"), ("t-a", "t-b")):
+        package = factory.create(
+            name, version="1.0.0", dependencies=[f"../{child}"] if child else []
+        )
+        _skill(factory, package, name)
+    return str(world.root / "g3" / "t-a")
+
+
+def _max_depth(world, depth: int) -> None:
+    _serve_policy(
+        world,
+        f"policy-g3-max-depth-{depth}",
+        {
+            "name": "g3",
+            "version": "1.0",
+            "enforcement": "block",
+            "dependencies": {"max_depth": depth},
+        },
+    )
+
+
+@pytest.mark.parametrize(("depth", "passes"), [(5, True), (1, False)], ids=["within", "exceeded"])
+def test_max_depth_bounds_the_locked_graph_in_audit(lifecycle_world, depth, passes) -> None:
+    """dependencies.max_depth -- audit --ci fails when the locked graph is deeper, naming the limit."""
+    installed = driver.run(lifecycle_world, ["install", _three_deep(lifecycle_world)])
+    assert installed.returncode == 0, _text(installed)
+    _max_depth(lifecycle_world, depth)
+    audit = driver.run(lifecycle_world, ["audit", "--ci"])
+    if passes:
+        assert f"All dependencies within depth limit ({depth})" in _text(audit), _text(audit)
+    else:
+        assert audit.returncode == 1, _text(audit)
+        assert f"exceed max depth {depth}" in _text(audit), _text(audit)
+
+
+# -- G10: dependencies.require_resolution (policy-schema.md, dependencies section) --
+
+
+@pytest.mark.parametrize(
+    ("resolution", "fails"),
+    [("project-wins", False), ("policy-wins", True), ("block", True)],
+)
+def test_require_resolution_decides_a_pinned_required_package_mismatch(
+    lifecycle_world, resolution, fails
+) -> None:
+    """dependencies.require_resolution -- a required pin the lock does not match fails audit
+    under policy-wins and block; project-wins keeps the project's ref."""
+    spec = lifecycle_world.packages["p-skill:git"].spec
+    installed = driver.run(lifecycle_world, ["install", spec])
+    assert installed.returncode == 0, _text(installed)
+    _serve_policy(
+        lifecycle_world,
+        f"policy-g10-{resolution}",
+        {
+            "name": "g10",
+            "version": "1.0",
+            "enforcement": "block",
+            "dependencies": {
+                "require": ["lifecycle/p-skill#v9.9.9"],
+                "require_resolution": resolution,
+            },
+        },
+    )
+    audit = driver.run(lifecycle_world, ["audit", "--ci"])
+    if fails:
+        assert audit.returncode == 1, _text(audit)
+        assert "version mismatch" in _text(audit), _text(audit)
+    else:
+        assert "version mismatch" not in _text(audit), _text(audit)
