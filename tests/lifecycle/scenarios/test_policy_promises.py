@@ -579,7 +579,8 @@ def test_require_pinned_constraint_refuses_an_unbounded_direct_dependency(
     result = driver.run(lifecycle_world, ["install", f"lifecycle/p-skill{ref}"])
     if refused:
         assert result.returncode == 1, _text(result)
-        assert "require_pinned_constraint" in _text(result), _text(result)
+        assert "dependency-pinned-constraint" in _text(result), _text(result)
+        assert "Nothing was changed" in _text(result), _text(result)
         assert manifest.read_bytes() == before
         assert not (lifecycle_world.project / ".agents/skills/p-skill").exists()
     else:
