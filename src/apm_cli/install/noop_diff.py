@@ -128,35 +128,32 @@ def _install_audit_off() -> bool:
     return not is_enabled("external_scanners")
 
 
-def _deployed_state_current(project_root: Path, lock: Any, manifest: Any, fetch: Any) -> str | None:
-    """The audit owner's narrow checks, on one parsed lock and manifest; None when all pass.
+def _gates_current(state: Any, fetch: Any) -> str | None:
+    """The audit owner's narrow gate checks on the one parsed state; None when all pass.
 
-    Deployed bytes are proven by content hash against the lock (the bytes
-    install scanned and deployed); the audit's hidden-Unicode sweep of
-    unrecorded files under the deploy trees is an audit concern, not an
-    install step, so it is not part of a no-op.
+    Deployed bytes are compared by ``desired_state.actual_vs_desired``. The
+    audit's hidden-Unicode sweep of unrecorded files under the deploy trees
+    is an audit step, not an install step, so it is not part of a no-op; the
+    install's own pre-deploy scan is kept (``_sources_scan_clean``).
     """
     from apm_cli.constants import APM_MODULES_DIR
     from apm_cli.install.exec_gate import exec_policy_from_discovery
     from apm_cli.policy import ci_checks as ci
 
-    root, user_scope, targets = ci.resolve_audit_scope(project_root, lock)
-    if user_scope or root != project_root:
-        return "scope"
+    root, lock, manifest, targets = state.project_root, state.lock, state.manifest, state.targets
     checks = (
         lambda: ci._check_ref_consistency(manifest, lock),
         lambda: ci._check_deployment_ledger_owners(lock),
-        lambda: ci._check_deployed_files_present(root, lock, targets),
         lambda: ci._check_no_orphans(manifest, lock),
-        lambda: ci._check_lockfile_targets_current(project_root, lock, user_scope=False),
-        lambda: ci._check_skill_subset_consistency(manifest, lock, project_root),
+        lambda: ci._check_lockfile_targets_current(root, lock, user_scope=False),
+        lambda: ci._check_skill_subset_consistency(manifest, lock, root),
         lambda: ci._check_config_consistency(manifest, lock),
-        lambda: ci._check_native_mcp_ownership(project_root, lock, targets, user_scope=False),
+        lambda: ci._check_native_mcp_ownership(root, lock, targets, user_scope=False),
         lambda: ci._check_local_bundle_hooks(
             root, lock, manifest, targets, user_scope=False, no_policy=False
         ),
         lambda: ci._check_hook_approval_pins(
-            project_root,
+            root,
             root,
             lock,
             manifest,
@@ -166,12 +163,12 @@ def _deployed_state_current(project_root: Path, lock: Any, manifest: Any, fetch:
             targets=targets,
         ),
         lambda: ci._check_exec_status_current(
-            project_root,
+            root,
             lock,
             manifest,
             targets,
             user_scope=False,
-            modules_root=project_root / APM_MODULES_DIR,
+            modules_root=root / APM_MODULES_DIR,
             policy_provider=lambda: exec_policy_from_discovery(lambda: fetch),
         ),
     )
@@ -179,11 +176,6 @@ def _deployed_state_current(project_root: Path, lock: Any, manifest: Any, fetch:
         result = check()
         if not result.passed or getattr(result, "warned", False):
             return result.name
-    drift, unresolved = ci.verify_deployed_file_hashes(root, lock, targets)
-    if drift or unresolved:
-        return "deployed file hash"
-    if lock.staged_hash_drift(project_root):
-        return "staged hash"
     return None
 
 
@@ -199,21 +191,21 @@ def _policy_checks_pass(project_root: Path, fetch: Any) -> bool:
 
 def full_run_reason(project_root: Path) -> str | None:
     """Why a plain install of *project_root* would change something; None if it would not."""
-    from apm_cli.core.scope import manifest_file
-    from apm_cli.deps.lockfile import LockFile, get_lockfile_path, installed_apm_version
-    from apm_cli.models.apm_package import APMPackage
+    from apm_cli.deps.lockfile import installed_apm_version
+    from apm_cli.install.desired_state import actual_vs_desired, build_desired_state
+    from apm_cli.policy.ci_checks import resolve_audit_scope
 
-    lock = LockFile.read(get_lockfile_path(project_root))
-    if lock is None:
-        return "no lockfile"
+    state = build_desired_state(project_root)
+    if state is None:
+        return "no lockfile or apm.yml"
+    lock = state.lock
     if lock.apm_version != installed_apm_version():
         return "lockfile from another APM version"
     if lock.lsp_servers or lock.local_deployed_files or lock.local_staged_files:
         return "local content or LSP"
-    manifest_path = manifest_file(project_root)
-    if not manifest_path.is_file():
-        return "no apm.yml"
-    manifest = APMPackage.from_apm_yml(manifest_path)
+    root, user_scope, _targets = resolve_audit_scope(project_root, lock)
+    if user_scope or root != project_root:
+        return "scope"
     admits, fetch = _policy_admits(project_root)
     if not admits:
         return "org policy"
@@ -223,7 +215,9 @@ def full_run_reason(project_root: Path) -> str | None:
         return "install-time audit enabled"
     if not _sources_scan_clean(project_root, lock):
         return "security scan findings"
-    failed = _deployed_state_current(project_root, lock, manifest, fetch)
+    if not actual_vs_desired(state).empty:
+        return "deployed files differ"
+    failed = _gates_current(state, fetch)
     if failed:
         return failed
     if not _policy_checks_pass(project_root, fetch):
