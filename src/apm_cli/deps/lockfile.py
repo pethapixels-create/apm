@@ -1827,10 +1827,10 @@ class LockFile:
         if unchanged and same_document(existing_text, serialized, existing_document):
             # A proven no-op keeps the file's own bytes (comments, key style).
             return True
-        # Later reads of these bytes in this process load the document, not the text.
-        remember_lockfile_text(serialized, document)
         if not stage_lockfile(path, serialized):
             atomic_write_text(path, serialized, new_file_mode=umask_file_mode(path))
+        # Later reads of these bytes in this process load the document, not the text.
+        remember_lockfile_text(serialized, document)
         return True
 
     @classmethod
