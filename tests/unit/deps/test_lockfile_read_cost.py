@@ -6,6 +6,7 @@ import json
 import sys
 import uuid
 from collections.abc import Callable
+from pathlib import Path
 from types import CodeType
 
 import pytest
@@ -231,6 +232,29 @@ def _rich_lock(tag: str) -> LockFile:
     return lock
 
 
+def _yaml_frames(action: Callable[[], object]) -> int:
+    """Count Python frames inside the ``yaml`` package while *action* runs.
+
+    Loader-agnostic: the pure-Python and libyaml loaders both construct
+    through ``yaml/constructor.py``, so any parse shows up here.
+    """
+    package = str(Path(yaml.__file__).parent)
+    calls = 0
+
+    def profiler(frame, event, _arg):
+        nonlocal calls
+        if event == "call" and frame.f_code.co_filename.startswith(package):
+            calls += 1
+
+    previous = sys.getprofile()
+    sys.setprofile(profiler)
+    try:
+        action()
+    finally:
+        sys.setprofile(previous)
+    return calls
+
+
 class TestLockFileWrittenTextIsNotReparsed:
     """A command that writes the lockfile reads its own bytes back without parsing them."""
 
@@ -245,14 +269,10 @@ class TestLockFileWrittenTextIsNotReparsed:
         if staged:
             with lockfile_write_scope(LockfileWriter.INSTALL):
                 lock.write(path)
-                parses = _count_calls(
-                    yaml_io._bounded_load.__code__, lambda: reads.append(LockFile.read(path))
-                )
+                parses = _yaml_frames(lambda: reads.append(LockFile.read(path)))
         else:
             lock.write(path)
-            parses = _count_calls(
-                yaml_io._bounded_load.__code__, lambda: reads.append(LockFile.read(path))
-            )
+            parses = _yaml_frames(lambda: reads.append(LockFile.read(path)))
 
         assert parses == 0
         assert reads[0] is not None
