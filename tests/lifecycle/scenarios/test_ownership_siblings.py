@@ -713,6 +713,9 @@ def test_a_closed_gate_retires_a_hook_without_a_lock(lifecycle_world, gate) -> N
     scenario.finish()
 
 
+_WITHHELD_GATE = "denied-executable"
+
+
 def test_a_withheld_hook_a_checkout_brings_back_is_kept_announced_and_detected(
     lifecycle_world,
 ) -> None:
@@ -730,8 +733,11 @@ def test_a_withheld_hook_a_checkout_brings_back_is_kept_announced_and_detected(
     assert not hook.exists()
     scenario.user_write(rel, committed.decode("ascii"))
     _forget_lock(scenario)
+    # The deny is recorded and nothing of h-hook is deployed: a denied executable.
+    assert scenario.model.gate("h-hook", "hook") == "denied"
     scenario.run(
         "install",
+        credit=[_pair("present-provenance-unknown", PRIM="hook", GATE=_WITHHELD_GATE)],
         keep={"project": (rel,)},
         says=[rf"Kept {re.escape(rel)}: it sits at h-hook's hook path"],
     )
@@ -1415,6 +1421,9 @@ CREDITS = credits(
             ]
             for gate in ("revoked-after-deploy", "unapproved-exec")
         },
+        "test_a_withheld_hook_a_checkout_brings_back_is_kept_announced_and_detected": [
+            _pair("present-provenance-unknown", PRIM="hook", GATE=_WITHHELD_GATE)
+        ],
         **{
             f"test_a_native_plugins_skill_in_the_users_hands_survives_install[{deployed}]": [
                 _pair(deployed, SRC="native-plugin")

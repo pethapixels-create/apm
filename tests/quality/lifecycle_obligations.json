@@ -11941,8 +11941,9 @@
    "family": "pair",
    "issue": "#4101",
    "lane": "T-6b",
-   "status": "baseline",
-   "strength": "e2e"
+   "status": "required",
+   "strength": "e2e",
+   "witness": "tests/lifecycle/scenarios/test_ownership_siblings.py::test_a_withheld_hook_a_checkout_brings_back_is_kept_announced_and_detected"
   },
   "pair|DEPLOYED=present-provenance-unknown|GATE=none": {
    "family": "pair",
