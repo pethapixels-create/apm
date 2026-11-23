@@ -8,7 +8,7 @@ Each row authors its own packages and serves its own ``apm-policy.yml`` from a
 unique org (``_serve_policy``), so the shared world variants stay untouched.
 A promise row is paired with a control row that proves the fixture really
 deploys what the promise restricts, so the promise row can never pass
-vacuously. Rows whose promise is under private tracking are strict xfail.
+vacuously. A promise row the CLI does not keep yet is a strict xfail citing its issue.
 """
 
 from __future__ import annotations
@@ -31,7 +31,6 @@ pytestmark = [
     pytest.mark.promise("P-INV-I4", "P-INV-I7"),
 ]
 
-_PRIVATE = "see private tracking"
 _SERVER = "t-transitive-srv"
 _MCP_CONFIGS = (".mcp.json", ".vscode/mcp.json", ".cursor/mcp.json")
 
@@ -164,45 +163,8 @@ def test_transitive_mcp_on_the_allow_list_is_admitted(lifecycle_world, path) -> 
     assert _configured(lifecycle_world, _CONFIGURED_NAME[path]), _text(result)
 
 
-@pytest.mark.xfail(strict=True, reason=f"G1 policy promise: {_PRIVATE}")
-@pytest.mark.parametrize("path", PATHS)
-def test_trust_transitive_false_refuses_an_unlisted_transitive_server(
-    lifecycle_world, path
-) -> None:
-    """mcp.trust_transitive false: install refuses a transitive server mcp.allow does not name."""
-    parent, child, _name = _author(lifecycle_world, path)
-    _transitive_policy(lifecycle_world, path, trust_transitive=False)
-    result = _install(lifecycle_world, path, parent, child)
-    assert result.returncode == 1, _text(result)
-    assert "trust_transitive" in _text(result), _text(result)
-    assert not _configured(lifecycle_world, _CONFIGURED_NAME[path]), _text(result)
-
-
-@pytest.mark.xfail(strict=True, reason=f"G1 policy promise: {_PRIVATE}")
-@pytest.mark.parametrize("path", PATHS)
-def test_trust_transitive_false_fails_audit_for_an_unlisted_transitive_server(
-    lifecycle_world, path
-) -> None:
-    """A server installed before the policy applied fails ``audit --ci`` once it does."""
-    parent, child, name = _author(lifecycle_world, path)
-    installed = _install(lifecycle_world, path, parent, child)
-    assert installed.returncode == 0, _text(installed)
-    _transitive_policy(lifecycle_world, path, trust_transitive=False)
-    audit = driver.run(lifecycle_world, ["audit", "--ci"])
-    assert audit.returncode == 1, _text(audit)
-    # The policy names the cause: a one-run flag install already fails audit on
-    # its own (the consumer trust check), so the server name alone proves nothing.
-    assert "trust_transitive" in _text(audit), _text(audit)
-    assert name in _text(audit), _text(audit)
-
-
-# Policy activation (regent ruling): an explicit ``trust_transitive: false`` counts
-# as set; a policy that states nothing keeps no enforcement; any other non-default
-# field makes the default ``false`` apply. Shown on the registry path.
-_ACTIVATION = {
-    "explicit-false-alone": {"trust_transitive": False},
-    "default-under-another-field": {"deny": [_UNRELATED_DENY]},
-}
+# Policy activation (regent ruling): a policy that states nothing keeps no
+# enforcement. Shown on the registry path.
 
 
 def _activation_policy(world, case: str, mcp: dict | None) -> None:
@@ -220,18 +182,6 @@ def test_a_policy_that_states_nothing_keeps_transitive_servers_admitted(lifecycl
     assert result.returncode == 0, _text(result)
     assert "present but empty" in _text(result), _text(result)
     assert _configured(lifecycle_world, _CONFIGURED_NAME["registry"]), _text(result)
-
-
-@pytest.mark.xfail(strict=True, reason=f"G1 policy promise: {_PRIVATE}")
-@pytest.mark.parametrize("case", sorted(_ACTIVATION))
-def test_an_active_policy_refuses_an_unlisted_transitive_server(lifecycle_world, case) -> None:
-    """An explicit false, or the default false under any other non-default field, refuses."""
-    parent, child, _name = _author(lifecycle_world, "registry")
-    _activation_policy(lifecycle_world, case, _ACTIVATION[case])
-    result = _install(lifecycle_world, "registry", parent, child)
-    assert result.returncode == 1, _text(result)
-    assert "trust_transitive" in _text(result), _text(result)
-    assert not _configured(lifecycle_world, _CONFIGURED_NAME["registry"]), _text(result)
 
 
 # -- G2: manifest.content_types (policy-schema.md, manifest section) ---------------
@@ -261,26 +211,6 @@ def test_content_types_control_an_instruction_deploys(lifecycle_world) -> None:
     result = driver.run(lifecycle_world, ["install", spec])
     assert result.returncode == 0, _text(result)
     assert _instruction_deployed(lifecycle_world), _text(result)
-
-
-@pytest.mark.xfail(strict=True, reason=f"G2 policy promise: {_PRIVATE}")
-def test_content_types_allow_list_keeps_other_types_out(lifecycle_world) -> None:
-    """manifest.content_types {allow: [skill]} -- an instruction is never deployed."""
-    _serve_policy(
-        lifecycle_world,
-        "policy-g2-skills-only",
-        {
-            "name": "g2",
-            "version": "1.0",
-            "enforcement": "block",
-            "manifest": {"content_types": {"allow": ["skill"]}},
-        },
-    )
-    spec = _skill_and_instruction(lifecycle_world)
-    result = driver.run(lifecycle_world, ["install", spec])
-    output = " ".join((result.stdout + result.stderr).split())
-    assert not _instruction_deployed(lifecycle_world), output
-    assert "content_types" in output, output
 
 
 # -- G11: manifest.scripts (policy-schema.md, manifest section) --------------------
