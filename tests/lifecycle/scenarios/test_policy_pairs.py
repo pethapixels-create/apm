@@ -21,6 +21,7 @@ import re
 
 import pytest
 
+from tests.lifecycle import driver
 from tests.lifecycle.scenarios._kit import (
     PROJECT_HOME_ALLOWED,
     Known,
@@ -375,6 +376,9 @@ def test_a_denied_local_bundle_is_refused_before_any_write(lifecycle_world) -> N
     kinds = {"p-exec-bundle": ("hook", "mcp", "bin")}
     scenario = Scenario(world, specs, policy="allow", kinds=kinds)
     _deny(scenario, "p-exec-bundle")
+    # Warm the policy cache first, so the refusal itself may change no cache byte.
+    warmed = driver.run(world, ["policy", "status"])
+    assert warmed.returncode == 0, warmed.stdout + warmed.stderr
     roots = dict(scenario.snapshot_roots())
     cache = world.cache_root
     if cache is not None and not any(cache.is_relative_to(r) for r in roots.values()):
