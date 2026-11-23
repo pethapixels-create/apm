@@ -10,7 +10,8 @@ org. A refusal under ``enforcement: block`` deploys nothing of the install and
 leaves apm.yml and apm.lock.yaml unchanged; ``warn`` deploys and names the kind.
 Kinds are counted by where a package ships them: ``.apm/<dir>/`` (an unnamed
 directory is its own kind) and the components a plugin manifest declares.
-Allow lists inherited through ``extends:`` only narrow, by kind. Each refusal
+Allow lists inherited through ``extends:`` only narrow, by kind, and ``audit --ci``
+judges locked content even when apm_modules is gone. Each refusal
 row is paired with an admitting row on the same fixture, so no row passes
 vacuously.
 """
@@ -201,16 +202,15 @@ def test_an_inherited_allow_list_only_narrows_by_kind(
     assert _deployed(world, "t-inherit.instructions.md"), _text(result)
 
 
-def test_audit_fails_a_locked_package_whose_content_is_not_on_disk(lifecycle_world) -> None:
-    """``audit --ci`` cannot verify a locked package with no copy on disk, so it fails."""
+def test_deleting_apm_modules_does_not_hide_a_disallowed_kind_from_audit(lifecycle_world) -> None:
+    """``audit --ci`` judges the locked packages' content even when apm_modules is gone."""
     world = lifecycle_world
-    _serve_policy(world, "policy-ct-unverifiable", _policy(["skill"]))
-    installed = driver.run(world, ["install", world.packages["p-skill:git"].spec])
+    _serve_policy(world, "policy-ct-no-modules", _policy(["skill"]))
+    installed = driver.run(world, ["install", "--no-policy", world.packages["p-exec:git"].spec])
     assert installed.returncode == 0, _text(installed)
-    audit = driver.run(world, ["audit", "--ci"])
-    assert "content is not on disk" not in _text(audit), _text(audit)
     shutil.rmtree(world.project / "apm_modules")
     audit = driver.run(world, ["audit", "--ci"])
     text = _text(audit)
     assert audit.returncode == 1, text
-    assert "content-types" in text and "content is not on disk" in text, text
+    assert "content-types" in text, text
+    assert "manifest.content_types allows only: skill" in text, text
