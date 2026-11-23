@@ -894,8 +894,26 @@ POLICY_REFUSALS = (
     "pair|SRC=inline-mcp|GATE=denied-dependency",
 )
 
+# A local bundle meets dependencies.deny by its own name and every package it
+# records, before any file is written (install/bundle_admission.py, #4646). The
+# cause pins the denied world package and the deny-pattern reason.
+BUNDLE_POLICY_BLOCK = ExpectedRefusal(
+    1,
+    r"(?s)(?=.*Install\s+blocked\s+by\s+org\s+policy)"
+    r"(?=.*Policy\s+violation:\s+\S*p-exec\s+--\s+denied\s+by\s+pattern)",
+    "P-INV-I4",
+    "install/bundle_admission.py admit_bundle: a denied local bundle is refused unwritten",
+)
+
 EXPECTED_REFUSALS: Mapping[str, ExpectedRefusal] = {
     **dict.fromkeys(POLICY_REFUSALS, POLICY_BLOCK),
+    **dict.fromkeys(
+        (
+            "pair|OP=bundle-install|GATE=denied-dependency",
+            "pair|SRC=local-bundle|GATE=denied-dependency",
+        ),
+        BUNDLE_POLICY_BLOCK,
+    ),
     "pair|DEPLOYED=edited|FROZEN=on": ExpectedRefusal(
         1,
         r"--frozen: deployed files do not match the hashes recorded in apm\.lock\.yaml",

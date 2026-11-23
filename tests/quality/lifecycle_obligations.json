@@ -14898,8 +14898,9 @@
    "family": "pair",
    "issue": "#4108",
    "lane": "T-7b",
-   "status": "baseline",
-   "strength": "e2e"
+   "status": "required",
+   "strength": "e2e",
+   "witness": "tests/lifecycle/scenarios/test_policy_pairs.py::test_a_denied_local_bundle_is_refused_before_any_write"
   },
   "pair|OP=bundle-install|GATE=denied-executable": {
    "credited_by": [
@@ -21937,8 +21938,9 @@
    "family": "pair",
    "issue": "#4108",
    "lane": "T-7b",
-   "status": "baseline",
-   "strength": "e2e"
+   "status": "required",
+   "strength": "e2e",
+   "witness": "tests/lifecycle/scenarios/test_policy_pairs.py::test_a_denied_local_bundle_is_refused_before_any_write"
   },
   "pair|SRC=local-bundle|GATE=denied-executable": {
    "family": "pair",
