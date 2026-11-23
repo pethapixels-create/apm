@@ -43,7 +43,7 @@ from ..models.dependency.replacement import (
 from ..models.dependency.subsets import SkillTargetSelection, canonical_target_subset
 from ..native_plugins import record as native_rec
 from .carried_license import CarriedLicense, records_from_lock_data, records_to_lock_data
-from .lockfile_container import parse_lockfile_text
+from .lockfile_container import parse_lockfile_text, remember_lockfile_text
 from .lockfile_container import validate_lockfile_container as _validate_lockfile_container
 from .lockfile_extensions import carry_vendor_extensions, vendor_extensions
 from .lockfile_version_remedy import with_version_remedy
@@ -1757,7 +1757,6 @@ class LockFile:
         from ..utils.atomic_io import atomic_write_text, umask_file_mode
         from ..utils.staging_guard import assert_no_staging_paths
         from ..utils.yaml_io import load_yaml_str, yaml_to_str
-        from .lockfile_container import remember_lockfile_text
         from .lockfile_document import document_snapshot, same_document
         from .lockfile_write_authority import stage_lockfile, staged_lockfile_text
 
@@ -1829,8 +1828,7 @@ class LockFile:
             return True
         if not stage_lockfile(path, serialized):
             atomic_write_text(path, serialized, new_file_mode=umask_file_mode(path))
-        # Later reads of these bytes in this process load the document, not the text.
-        remember_lockfile_text(serialized, document)
+        remember_lockfile_text(serialized, document)  # later reads skip the parse
         return True
 
     @classmethod
