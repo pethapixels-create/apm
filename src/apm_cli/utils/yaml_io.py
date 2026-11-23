@@ -14,6 +14,7 @@ Public API::
     yaml_to_str(data)               -- serialize dict -> YAML string
 """
 
+import threading
 from io import StringIO
 from pathlib import Path
 from typing import Any, NoReturn
@@ -368,7 +369,26 @@ def load_yaml_str(text: str) -> dict[str, Any] | None:
     return _bounded_load(text)
 
 
+_TOP_LEVEL_LIMIT = 4
+_top_level_values: dict[tuple[str, str], list[str | None] | None] = {}
+_top_level_lock = threading.Lock()
+
+
 def top_level_scalar_values(text: str, key: str) -> list[str | None] | None:
+    """Memoized :func:`_top_level_scalar_values`: a pure function of *text*."""
+    with _top_level_lock:
+        if (text, key) in _top_level_values:
+            values = _top_level_values[(text, key)]
+            return None if values is None else list(values)
+    values = _top_level_scalar_values(text, key)
+    with _top_level_lock:
+        _top_level_values[(text, key)] = values
+        while len(_top_level_values) > _TOP_LEVEL_LIMIT:
+            _top_level_values.pop(next(iter(_top_level_values)))
+    return None if values is None else list(values)
+
+
+def _top_level_scalar_values(text: str, key: str) -> list[str | None] | None:
     """Return every top-level *key* occurrence's scalar text, in document order.
 
     Works on the composed node graph (no object construction, so no merge-key
