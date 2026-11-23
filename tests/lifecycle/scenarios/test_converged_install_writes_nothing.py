@@ -44,7 +44,9 @@ def test_a_converged_install_touches_no_file(lifecycle_world: World, scope: str)
     before = capture_stamps(world.project, patterns)
     assert before, f"precondition: nothing matched {patterns}"
 
-    output = _ok(world, "install")
+    result = driver.run(world, ("install",))
 
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
     rewritten = touched(before, capture_stamps(world.project, patterns))
     assert not rewritten, "a converged install wrote:\n" + "\n".join(rewritten) + f"\n{output}"
